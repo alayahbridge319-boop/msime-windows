@@ -414,6 +414,9 @@ asr_token_doubao = "<YOUR_OWN_DOUBAO_ACCESS_TOKEN>"
 asr_token_openai = ""
 asr_token_siliconflow = ""
 asr_token_groq = ""
+asr_token_zhipu = ""
+asr_token_minimax = ""
+asr_token_custom = ""
 # 豆包流式接口二选一：
 #   .../sauc/bigmodel_nostream 边录边传、返回整句结果，准确率更高，官方推荐用于输入法
 #   .../sauc/bigmodel_async    双向流式，增量结果更密集，实时上屏刷新更频繁
@@ -437,6 +440,13 @@ polish_token_siliconflow = "<YOUR_OWN_POLISH_TOKEN>"
 polish_token_openai = ""
 polish_token_deepseek = ""
 polish_token_groq = ""
+polish_token_minimax = ""
+polish_token_moonshot = ""
+polish_token_zhipu = ""
+polish_token_dashscope = ""
+polish_token_volcengine = ""
+polish_token_openrouter = ""
+polish_token_custom = ""
 polish_endpoint = "https://api.siliconflow.cn/v1/chat/completions"
 # 留空则按提供商填默认值，例如 Qwen/Qwen3-8B、gpt-4o-mini。
 polish_model = ""

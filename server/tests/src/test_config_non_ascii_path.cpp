@@ -42,19 +42,22 @@ class ScopedEnv
 
 // LOCALAPPDATA alone no longer decides where the config lives: an installed product records its
 // data directory in HKLM, which outranks the profile. Pin the config directory explicitly so these
-// cases stay isolated on a machine that has the IME installed.
+// cases stay isolated on a machine that has the IME installed. The provider registry store
+// (ai_providers.json) resolves through METASEQUOIA_IME_DATA_DIR and needs the same pin.
 class ScopedConfigLocation
 {
   public:
     explicit ScopedConfigLocation(const std::filesystem::path &local_app_data)
         : local_app_data_(L"LOCALAPPDATA", local_app_data.wstring()),
-          config_dir_(L"METASEQUOIA_IME_CONFIG_DIR", (local_app_data / L"metasequoiaime").wstring())
+          config_dir_(L"METASEQUOIA_IME_CONFIG_DIR", (local_app_data / L"metasequoiaime").wstring()),
+          data_dir_(L"METASEQUOIA_IME_DATA_DIR", (local_app_data / L"metasequoiaime").wstring())
     {
     }
 
   private:
     ScopedEnv local_app_data_;
     ScopedEnv config_dir_;
+    ScopedEnv data_dir_;
 };
 
 std::filesystem::path MakeProfileRoot()

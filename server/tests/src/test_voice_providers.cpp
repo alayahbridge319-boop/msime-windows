@@ -13,6 +13,10 @@ TEST_CASE(voice_providers_resolve_openai_compatible_defaults)
     REQUIRE_EQ(VoiceInput::DefaultAsrEndpoint("openai"), "https://api.openai.com/v1/audio/transcriptions");
     REQUIRE_EQ(VoiceInput::DefaultAsrModel("openai"), "whisper-1");
     REQUIRE_EQ(VoiceInput::DefaultAsrModel("siliconflow"), "FunAudioLLM/SenseVoiceSmall");
+    // MiniMax 语音转文字：multipart file+model，响应 {text}，与现有解析兼容（实测 HTTP 200）。
+    REQUIRE_EQ(VoiceInput::DefaultAsrEndpoint("minimax"), "https://api.minimax.cn/v1/speech_to_text");
+    REQUIRE_EQ(VoiceInput::DefaultAsrModel("minimax"), "asr-1.0");
+    REQUIRE_EQ(VoiceInput::AsrTokenSlotKey("minimax"), "asr_token_minimax");
     REQUIRE_EQ(VoiceInput::AsrTokenSlotKey("siliconflow"), "asr_token_siliconflow");
     REQUIRE(VoiceInput::IsPlaceholderToken("<YOUR_OWN_DOUBAO_ACCESS_TOKEN>"));
     {

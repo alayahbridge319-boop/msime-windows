@@ -35,12 +35,15 @@ TEST_CASE(voice_batch_protocol_preserves_polish_prompt_and_thinking_settings)
     config.polish_model = "fixture-polish";
     config.polish_prompt = "fixture prompt";
     config.polish_provider = "deepseek";
+    // 厂商字段现在跟着接口地址走，所以 DeepSeek 行为要显式给一个 DeepSeek 地址。
+    config.polish_endpoint = "https://api.deepseek.com/chat/completions";
     auto body = nlohmann::json::parse(VoiceInput::BuildBatchPolish("原始文本", config));
     REQUIRE_EQ(body["model"].get<std::string>(), "fixture-polish");
     REQUIRE_EQ(body["messages"][0]["content"].get<std::string>(), "fixture prompt");
     REQUIRE_EQ(body["messages"][1]["content"].get<std::string>(), "<asr_text>\n原始文本\n</asr_text>");
     REQUIRE_EQ(body["thinking"]["type"].get<std::string>(), "disabled");
     config.polish_provider = "siliconflow";
+    config.polish_endpoint = "https://api.siliconflow.cn/v1/chat/completions";
     body = nlohmann::json::parse(VoiceInput::BuildBatchPolish("原始文本", config));
     REQUIRE_EQ(body["enable_thinking"].get<bool>(), false);
     REQUIRE(!body.contains("thinking"));
@@ -52,6 +55,7 @@ TEST_CASE(voice_batch_protocol_sends_deepseek_thinking_level)
     config.polish_model = "fixture-polish";
     config.polish_prompt = "fixture prompt";
     config.polish_provider = "deepseek";
+    config.polish_endpoint = "https://api.deepseek.com/chat/completions";
     for (const char *level : {"low", "high", "max"})
     {
         config.polish_thinking = level;
@@ -61,7 +65,17 @@ TEST_CASE(voice_batch_protocol_sends_deepseek_thinking_level)
     }
     // 其他提供商不认识 reasoning_effort，强度设置对它们不生效。
     config.polish_provider = "openai";
+    config.polish_endpoint = "https://api.openai.com/v1/chat/completions";
     const auto body = nlohmann::json::parse(VoiceInput::BuildBatchPolish("原始文本", config));
     REQUIRE(!body.contains("thinking"));
     REQUIRE(!body.contains("reasoning_effort"));
+
+    // 标签写错也要按地址判断：用户把 MiniMax 的地址填进 DeepSeek 那格时，
+    // 请求里带着 thinking.type 会被对方以「requires adaptive thinking」直接拒绝。
+    config.polish_provider = "deepseek";
+    config.polish_endpoint = "https://api.minimax.cn/v1/chat/completions";
+    const auto foreign = nlohmann::json::parse(VoiceInput::BuildBatchPolish("原始文本", config));
+    REQUIRE(!foreign.contains("thinking"));
+    REQUIRE(!foreign.contains("reasoning_effort"));
+    REQUIRE(!foreign.contains("enable_thinking"));
 }

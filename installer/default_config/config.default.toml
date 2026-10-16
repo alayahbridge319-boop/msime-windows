@@ -413,6 +413,9 @@ asr_token_doubao = "<YOUR_ASR_TOKEN_DOUBAO>"
 asr_token_openai = "<YOUR_ASR_TOKEN_OPENAI>"
 asr_token_siliconflow = "<YOUR_ASR_TOKEN_SILICONFLOW>"
 asr_token_groq = "<YOUR_ASR_TOKEN_GROQ>"
+asr_token_zhipu = "<YOUR_ASR_TOKEN_ZHIPU>"
+asr_token_minimax = "<YOUR_ASR_TOKEN_MINIMAX>"
+asr_token_custom = "<YOUR_ASR_TOKEN_CUSTOM>"
 # 豆包流式接口二选一：
 #   .../sauc/bigmodel_nostream 边录边传、返回整句结果，准确率更高，官方推荐用于输入法
 #   .../sauc/bigmodel_async    双向流式，增量结果更密集，实时上屏刷新更频繁
@@ -437,6 +440,13 @@ polish_token_siliconflow = "<YOUR_POLISH_TOKEN_SILICONFLOW>"
 polish_token_openai = "<YOUR_POLISH_TOKEN_OPENAI>"
 polish_token_deepseek = "<YOUR_POLISH_TOKEN_DEEPSEEK>"
 polish_token_groq = "<YOUR_POLISH_TOKEN_GROQ>"
+polish_token_minimax = "<YOUR_POLISH_TOKEN_MINIMAX>"
+polish_token_moonshot = "<YOUR_POLISH_TOKEN_MOONSHOT>"
+polish_token_zhipu = "<YOUR_POLISH_TOKEN_ZHIPU>"
+polish_token_dashscope = "<YOUR_POLISH_TOKEN_DASHSCOPE>"
+polish_token_volcengine = "<YOUR_POLISH_TOKEN_VOLCENGINE>"
+polish_token_openrouter = "<YOUR_POLISH_TOKEN_OPENROUTER>"
+polish_token_custom = "<YOUR_POLISH_TOKEN_CUSTOM>"
 polish_endpoint = "https://api.deepseek.com/chat/completions"
 # 留空则按提供商填默认值，例如 Qwen/Qwen3-8B、gpt-4o-mini。
 polish_model = "deepseek-v4-flash"
