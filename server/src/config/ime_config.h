@@ -4,9 +4,11 @@
 #include "engine/core/fuzzy_pinyin_options.h"
 #include "engine/core/scheme_type.h"
 #include "engine/shuangpin/shuangpin_profile.h"
+#include "engine/contracts/input_state_shortcuts.h"
 #include <toml++/toml.h>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -161,6 +163,26 @@ struct NiuTransConfig
     std::string apikey;
 };
 
+// 候选词翻译读取的整份配置快照。provider 来自 [translation].provider，旧配置没有这个键时由
+// [tencent_tmt]/[custom_translation]/[niutrans] 的 enabled 布尔在加载时推导；其余字段是各提供方
+// 配置的副本，ai 复用 AI 辅助当前服务商。配置加载和相关设置写入后整份替换，翻译 worker 与
+// 候选线程只读快照，不直接读会被重载改写的各段全局字符串。
+struct TranslationConfig
+{
+    // tencent | niutrans | custom | ai
+    std::string provider = "tencent";
+    TencentTmtConfig tencent;
+    CustomTranslationConfig custom;
+    NiuTransConfig niutrans;
+    struct Ai
+    {
+        std::string provider;
+        std::string endpoint;
+        std::string token;
+        std::string model;
+    } ai;
+};
+
 // [network] 段：云输入、模型下载、AI、翻译、语音等所有出站请求共用的代理设置。
 struct NetworkProxyConfig
 {
@@ -254,6 +276,17 @@ bool GetConfiguredSwitchLanguageCtrlEnabled();
 bool SetConfiguredSwitchLanguageCtrlEnabled(bool enabled);
 bool GetConfiguredSwitchLanguageCtrlAltSpaceEnabled();
 bool SetConfiguredSwitchLanguageCtrlAltSpaceEnabled(bool enabled);
+using InputStateShortcutValues = std::array<std::string, FanyImeInputStateShortcuts::Definitions.size()>;
+// Views over values for the contract's Validate/Resolve; valid while values lives.
+inline FanyImeInputStateShortcuts::Values InputStateShortcutViews(const InputStateShortcutValues &values)
+{
+    FanyImeInputStateShortcuts::Values views;
+    for (std::size_t i = 0; i < views.size(); ++i)
+        views[i] = values[i];
+    return views;
+}
+const InputStateShortcutValues &GetConfiguredInputStateShortcuts();
+bool SetConfiguredInputStateShortcut(std::size_t index, const std::string &binding);
 const std::string &GetConfiguredShuangpinSchema();
 // 当前双拼方案是否把 ing 放在分号键上（微软、搜狗、紫光），此时分号在音节第二位是输入键。
 bool IsConfiguredShuangpinSemicolonFinal();
@@ -433,6 +466,8 @@ bool GetConfiguredEnglishCandidatesEnabled();
 bool SetConfiguredEnglishCandidatesEnabled(bool enabled);
 bool GetConfiguredCandidateTranslationsEnabled();
 bool SetConfiguredCandidateTranslationsEnabled(bool enabled);
+bool GetConfiguredCandidateTranslationShowPos();
+bool SetConfiguredCandidateTranslationShowPos(bool show);
 int GetConfiguredEnglishMixedInputMinChars();
 bool SetConfiguredEnglishMixedInputMinChars(int min_chars);
 bool GetConfiguredEmojiMixedInputEnabled();
@@ -455,15 +490,21 @@ bool SetConfiguredAssocSentenceShowNextOnDuplicate(bool enabled);
 bool GetConfiguredAssocSentenceSourceBadge();
 bool SetConfiguredAssocSentenceSourceBadge(bool enabled);
 // octagram 语法模型（八股文，[association] 段）：两个机制开关进设置页，模型 id 默认留空
-// = 未选择任何模型（设置页单选激活后写入），权重是配置文件里的高级调参项，不进设置页。
+// = 未选择任何模型（设置页单选激活后写入），权重与六参数是配置文件里的高级调参项，不进设置页。
 bool GetConfiguredAssocSentenceCollocationEnabled();
 bool SetConfiguredAssocSentenceCollocationEnabled(bool enabled);
-bool GetConfiguredAssocSentenceCollocationRerankWeight();
 std::string GetConfiguredAssocSentenceCollocationModel();
 bool SetConfiguredAssocSentenceCollocationModel(const std::string &model_id);
 double GetConfiguredAssocSentenceCollocationWeight();
-bool GetConfiguredUnicodeModeEnabled();
-bool SetConfiguredUnicodeModeEnabled(bool enabled);
+int GetConfiguredAssocSentenceCollocationMaxLength();
+int GetConfiguredAssocSentenceCollocationMinLength();
+double GetConfiguredAssocSentenceCollocationPenalty();
+double GetConfiguredAssocSentenceCollocationNonPenalty();
+double GetConfiguredAssocSentenceCollocationWeakPenalty();
+double GetConfiguredAssocSentenceCollocationRearPenalty();
+// Shift+U 部件拆字反查（U 模式）。
+bool GetConfiguredRadicalModeEnabled();
+bool SetConfiguredRadicalModeEnabled(bool enabled);
 // Shift+K 快捷短语模式。
 bool GetConfiguredQuickPhraseEnabled();
 bool SetConfiguredQuickPhraseEnabled(bool enabled);
@@ -498,10 +539,19 @@ bool SetConfiguredRModeEnabled(bool enabled);
 // engine/contracts/v_mode_input.h。
 bool GetConfiguredVModeEnabled();
 bool SetConfiguredVModeEnabled(bool enabled);
-// VModeChanged 的载荷："0" 关着或不是全拼/双拼，"1" 双拼（只认大写 V），"2" 全拼（V、v 都认）。
+// VModeChanged 的载荷："0" 关着或不是全拼/双拼/五笔，"1" 双拼或五笔（只认大写 V），
+// "2" 全拼（V、v 都认）。
 std::wstring FormatVModeWorkerPayload();
 bool GetConfiguredClipboardHistoryEnabled();
 bool SetConfiguredClipboardHistoryEnabled(bool enabled);
+bool GetConfiguredLanguageBarEnabled();
+bool SetConfiguredLanguageBarEnabled(bool enabled);
+bool GetConfiguredLanguageBarShowImeMode();
+bool SetConfiguredLanguageBarShowImeMode(bool enabled);
+bool GetConfiguredLanguageBarShowDoubleSingleByte();
+bool SetConfiguredLanguageBarShowDoubleSingleByte(bool enabled);
+bool GetConfiguredLanguageBarShowPunctuation();
+bool SetConfiguredLanguageBarShowPunctuation(bool enabled);
 bool GetConfiguredPagingMinusEqualEnabled();
 bool SetConfiguredPagingMinusEqualEnabled(bool enabled);
 bool GetConfiguredPagingCommaPeriodEnabled();
@@ -555,10 +605,17 @@ bool GetConfiguredCandidateFixedBadge();
 bool SetConfiguredCandidateFixedBadge(bool enabled);
 const std::string &GetConfiguredCandidateFixedBadgeStyle();
 bool SetConfiguredCandidateFixedBadgeStyle(const std::string &style);
+// AI 联想候选词的来源徽标样式（"robot" | "whale"），出厂 "robot"（🤖）。
+const std::string &GetConfiguredCandidateAiBadgeStyle();
+bool SetConfiguredCandidateAiBadgeStyle(const std::string &style);
 // 设置窗口关闭后隐藏驻留多久再退出进程：
 // "off" | "1m" | "5m" | "10m" | "30m" | "60m" | "forever"，默认 "10m"。
 const std::string &GetConfiguredSettingsWindowLinger();
 bool SetConfiguredSettingsWindowLinger(const std::string &linger);
+// "webview2" | "d2d" — renderer of the settings window, applied when it next opens.
+// Direct2D is experimental; WebView2 stays the default.
+const std::string &GetConfiguredSettingsUiBackend();
+bool SetConfiguredSettingsUiBackend(const std::string &backend);
 // "d2d" | "webview2" — candidate, floating toolbar, and tray menu renderer.
 // Changing this writes config immediately; the process snapshot does not switch
 // until the IME server is restarted.
@@ -617,6 +674,9 @@ bool SetConfiguredCustomTranslationString(const std::string &key, const std::str
 const NiuTransConfig &GetConfiguredNiuTrans();
 bool SetConfiguredNiuTransBool(const std::string &key, bool value);
 bool SetConfiguredNiuTransString(const std::string &key, const std::string &value);
+bool IsValidTranslationProvider(const std::string &provider);
+std::shared_ptr<const TranslationConfig> GetConfiguredTranslation();
+bool SetConfiguredTranslationString(const std::string &key, const std::string &value);
 // Snapshot by value: download threads and the cloud worker read it while the settings host rewrites it.
 NetworkProxyConfig GetConfiguredNetworkProxy();
 bool SetConfiguredNetworkString(const std::string &key, const std::string &value);

@@ -21,16 +21,28 @@
 namespace gram
 {
 
-// 万象 LTS 推荐的打分参数（octagram 自身默认 collocation_max_length=4、
-// collocation_min_length=3、collocation_penalty=non_collocation_penalty=-12）。
+// 打分参数。默认值 = 万象现行（wanxiang.schema.yaml）的 6/2/-14/-6/-100/-18，与出厂模板
+// installer/default_config/config.default.toml 的 [association] 键一致；宿主从配置读入后
+// 覆盖这里，这个默认只在没有配置的评测工具/单元测试里生效。
+// octagram 自身默认是 collocation_max_length=4、collocation_min_length=3、
+// collocation_penalty=non_collocation_penalty=-12，我们不用它。
 struct GrammarConfig
 {
-    int collocation_max_length = 8;
+    int collocation_max_length = 6;
     int collocation_min_length = 2;
-    double collocation_penalty = -10.0;
-    double non_collocation_penalty = -17.0;
-    double weak_collocation_penalty = -24.0;
+    double collocation_penalty = -14.0;
+    double non_collocation_penalty = -6.0;
+    double weak_collocation_penalty = -100.0;
     double rear_penalty = -18.0;
+
+    bool operator==(const GrammarConfig &other) const
+    {
+        return collocation_max_length == other.collocation_max_length &&
+               collocation_min_length == other.collocation_min_length &&
+               collocation_penalty == other.collocation_penalty &&
+               non_collocation_penalty == other.non_collocation_penalty &&
+               weak_collocation_penalty == other.weak_collocation_penalty && rear_penalty == other.rear_penalty;
+    }
 };
 
 // 一次 query() 的可观测计数。产品路径传 nullptr 即可，诊断工具用它回答

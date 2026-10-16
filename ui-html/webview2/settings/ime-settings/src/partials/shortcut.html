@@ -1,6 +1,6 @@
 <div class="content shortcut-settings" id="shortcut-settings">
   <div class="content-header"><span>快捷键</span></div>
-  <div class="shortcut-intro">输入法快捷键仅在对应输入状态或候选窗口显示时生效。翻页方式可在“输入”中启用或关闭。</div>
+  <div class="shortcut-intro">各快捷键的生效范围见下方说明。翻页方式可在“输入”中启用或关闭。</div>
 
   <div class="section shortcut-section section-page-option">
     <div class="shortcut-section-heading"><div><div class="section-title">简繁切换</div><div class="shortcut-section-description">仅在中文输入状态生效，切换时保留正在输入的内容</div></div></div>
@@ -38,12 +38,55 @@
   </div>
 
   <div class="section shortcut-section">
-    <div class="shortcut-section-heading"><div><div class="section-title">输入状态切换</div><div class="shortcut-section-description">英文候选模式仅在中文输入状态生效，再按一次回到拼音输入</div></div></div>
+    <div class="shortcut-section-heading"><div><div class="section-title">输入状态切换</div><div class="shortcut-section-description">支持 Ctrl 或 Ctrl+Shift 组合。英文候选模式仅在中文输入状态生效，再按一次回到拼音输入</div></div></div>
     <div class="shortcut-list">
-      <div class="shortcut-row"><span>切换英文候选模式（保持中文状态，以英文单词作为候选）</span><div class="shortcut-keys"><kbd>Ctrl</kbd><i>+</i><kbd>Shift</kbd><i>+</i><kbd>E</kbd></div></div>
-      <div class="shortcut-row"><span>全角 / 半角切换</span><div class="shortcut-keys"><kbd>Ctrl</kbd><i>+</i><kbd>Shift</kbd><i>+</i><kbd>Space</kbd></div></div>
-      <div class="shortcut-row"><span>中文 / 英文标点切换（开启标点锁定时不生效）</span><div class="shortcut-keys"><kbd>Ctrl</kbd><i>+</i><kbd>.</kbd></div></div>
+      <div class="shortcut-row">
+        <span>切换英文候选模式</span>
+        <div class="shortcut-editor">
+          <div class="shortcut-actions">
+            <button type="button" id="englishCandidatesHotkeyButton" aria-label="修改切换英文候选模式快捷键" aria-pressed="false" aria-describedby="englishCandidatesHotkeyStatus" disabled>Ctrl + Shift + E</button>
+            <button type="button" id="englishCandidatesHotkeyClear" disabled>清空</button>
+            <button type="button" id="englishCandidatesHotkeyReset" disabled>恢复默认</button>
+          </div>
+          <span id="englishCandidatesHotkeyStatus" role="status" aria-live="polite"></span>
+          <div id="englishCandidatesHotkeyConfirmation" class="shortcut-actions" hidden>
+            <button type="button" id="englishCandidatesHotkeyConfirm" aria-describedby="englishCandidatesHotkeyStatus">仍然绑定</button>
+            <button type="button" id="englishCandidatesHotkeyCancel">取消</button>
+          </div>
+        </div>
+      </div>
+      <div class="shortcut-row">
+        <span>全角 / 半角切换</span>
+        <div class="shortcut-editor">
+          <div class="shortcut-actions">
+            <button type="button" id="fullWidthHotkeyButton" aria-label="修改全角 / 半角切换快捷键" aria-pressed="false" aria-describedby="fullWidthHotkeyStatus" disabled>Ctrl + Shift + Space</button>
+            <button type="button" id="fullWidthHotkeyClear" disabled>清空</button>
+            <button type="button" id="fullWidthHotkeyReset" disabled>恢复默认</button>
+          </div>
+          <span id="fullWidthHotkeyStatus" role="status" aria-live="polite"></span>
+          <div id="fullWidthHotkeyConfirmation" class="shortcut-actions" hidden>
+            <button type="button" id="fullWidthHotkeyConfirm" aria-describedby="fullWidthHotkeyStatus">仍然绑定</button>
+            <button type="button" id="fullWidthHotkeyCancel">取消</button>
+          </div>
+        </div>
+      </div>
+      <div class="shortcut-row">
+        <span>中文 / 英文标点切换</span>
+        <div class="shortcut-editor">
+          <div class="shortcut-actions">
+            <button type="button" id="punctuationHotkeyButton" aria-label="修改中文 / 英文标点切换快捷键" aria-pressed="false" aria-describedby="punctuationHotkeyStatus" disabled>Ctrl + .</button>
+            <button type="button" id="punctuationHotkeyClear" disabled>清空</button>
+            <button type="button" id="punctuationHotkeyReset" disabled>恢复默认</button>
+          </div>
+          <span id="punctuationHotkeyStatus" role="status" aria-live="polite"></span>
+          <div id="punctuationHotkeyConfirmation" class="shortcut-actions" hidden>
+            <button type="button" id="punctuationHotkeyConfirm" aria-describedby="punctuationHotkeyStatus">仍然绑定</button>
+            <button type="button" id="punctuationHotkeyCancel">取消</button>
+          </div>
+        </div>
+      </div>
     </div>
+    <div class="shortcut-section-description">全半角和标点快捷键在中英文状态下均生效。绑定后会占用当前软件的同名快捷键；标点模式锁定时，仍接收标点快捷键，标点模式保持锁定。</div>
   </div>
 
   <div class="section shortcut-section">

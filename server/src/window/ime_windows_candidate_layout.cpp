@@ -89,6 +89,26 @@ double GetCandidateDecorationWidthDip()
 {
     return GetActiveCandidateSkinDecorationWidthDip();
 }
+
+double GetCandidateOuterTopDip()
+{
+    return GetActiveCandidateSkinOuterTopDip();
+}
+
+double GetCandidateOuterRightDip()
+{
+    return GetActiveCandidateSkinOuterRightDip();
+}
+
+double GetCandidateOuterBottomDip()
+{
+    return GetActiveCandidateSkinOuterBottomDip();
+}
+
+double GetCandidateOuterLeftDip()
+{
+    return GetActiveCandidateSkinOuterLeftDip();
+}
 } // namespace
 
 namespace ime_windows_detail
@@ -104,11 +124,15 @@ int GetCandidatePackingMarginTopDip()
 std::pair<double, double> AddCandidateDecorationToSize(const std::pair<double, double> &cardSize)
 {
     const double decorationTopDip = GetCandidateDecorationTopDip();
-    if (decorationTopDip <= 0.0)
+    std::pair<double, double> size = cardSize;
+    if (decorationTopDip > 0.0)
     {
-        return cardSize;
+        size = {(std::max)(size.first, GetCandidateDecorationWidthDip()), size.second + decorationTopDip};
     }
-    return {(std::max)(cardSize.first, GetCandidateDecorationWidthDip()), cardSize.second + decorationTopDip};
+    // v2 挂件挂在卡片外沿：窗口在卡片四周再各留出一块透明空白，立绘才不会被窗口边界裁掉。
+    size.first += GetCandidateOuterLeftDip() + GetCandidateOuterRightDip();
+    size.second += GetCandidateOuterTopDip() + GetCandidateOuterBottomDip();
+    return size;
 }
 
 int GetCandidateOuterTopPx(int cardAnchorY, int packingTopDip, FLOAT scale)
@@ -117,8 +141,18 @@ int GetCandidateOuterTopPx(int cardAnchorY, int packingTopDip, FLOAT scale)
     {
         scale = 1.0f;
     }
-    const double outerOffsetDip = static_cast<double>(packingTopDip) - GetCandidateDecorationTopDip();
+    const double outerOffsetDip =
+        static_cast<double>(packingTopDip) - GetCandidateDecorationTopDip() - GetCandidateOuterTopDip();
     return cardAnchorY + static_cast<int>(std::lround(outerOffsetDip * static_cast<double>(scale)));
+}
+
+int GetCandidateOuterLeftPx(int cardAnchorX, FLOAT scale)
+{
+    if (scale <= 0.0f)
+    {
+        scale = 1.0f;
+    }
+    return cardAnchorX - static_cast<int>(std::lround(GetCandidateOuterLeftDip() * static_cast<double>(scale)));
 }
 
 void RememberCandidateClip(const std::pair<double, double> &decoratedSize, FLOAT scale, int caretX, int caretY)
@@ -257,8 +291,9 @@ void ReanchorCandidateHostToPaintedCard(const POINT &layoutCaret, const std::pai
             hostY = coordinates.top + edgePadPx;
         }
     }
+    const int desiredOuterLeftPx = GetCandidateOuterLeftPx(anchorPos->first, scale);
     Global::MarginLeft =
-        (std::max)(0, static_cast<int>(std::lround((anchorPos->first - hostX) / static_cast<double>(scale))));
+        (std::max)(0, static_cast<int>(std::lround((desiredOuterLeftPx - hostX) / static_cast<double>(scale))));
     Global::MarginTop = GetCandidateOuterMarginDip(desiredOuterTopPx, hostY, scale);
 }
 

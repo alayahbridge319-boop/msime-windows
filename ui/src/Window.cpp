@@ -1,5 +1,6 @@
 #include "msimeui/Window.h"
 
+#include "msimeui/Animation.h"
 #include "msimeui/Application.h"
 #include "msimeui/Theme.h"
 #include "DebugLog.h"
@@ -7,7 +8,6 @@
 #include <algorithm>
 #include <d2d1.h>
 #include <dwmapi.h>
-#include <sstream>
 #include <windowsx.h>
 
 namespace msimeui
@@ -92,9 +92,136 @@ bool Window::Create()
         {
             SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
         }
-        SetTimer(hwnd_, 1, GetCaretBlinkTime(), nullptr);
+        StartCaretTimer();
     }
     return hwnd_ != nullptr;
+}
+
+void Window::StartCaretTimer()
+{
+    if (hwnd_)
+    {
+        SetTimer(hwnd_, 1, GetCaretBlinkTime(), nullptr);
+    }
+}
+
+void Window::SetQuitOnDestroy(bool quit)
+{
+    quitOnDestroy_ = quit;
+}
+
+void Window::SetBackgroundColor(const D2D1_COLOR_F &color)
+{
+    backgroundColor_ = color;
+    hasBackgroundColor_ = true;
+    Invalidate();
+}
+
+void Window::SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE mode)
+{
+    textAntialiasMode_ = mode;
+    Invalidate();
+}
+
+void Window::SetCompositionRendering(bool enabled, bool opaque)
+{
+    deviceResources_.SetCompositionOpaque(opaque);
+    if (composition_ == enabled)
+    {
+        return;
+    }
+    composition_ = enabled;
+    deviceResources_.DiscardTarget();
+    Invalidate();
+}
+
+void Window::RequestAnimationFrame()
+{
+    // Invalidating while painting would be validated again by EndPaint; OnPaint asks
+    // for the next frame once it is done instead.
+    animationRequested_ = true;
+    if (!painting_ && hwnd_)
+    {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+double Window::GetFrameTime() const
+{
+    return painting_ ? frameTimeMs_ : NowMs();
+}
+
+void Window::RefreshHover()
+{
+    if (!hwnd_)
+    {
+        return;
+    }
+    POINT screen = {};
+    GetCursorPos(&screen);
+    if (WindowFromPoint(screen) != hwnd_ || GetCapture() == hwnd_)
+    {
+        return;
+    }
+    POINT point = screen;
+    ScreenToClient(hwnd_, &point);
+    RECT client = {};
+    GetClientRect(hwnd_, &client);
+    if (!PtInRect(&client, point))
+    {
+        return;
+    }
+    UpdateHover(point);
+    SetCursor(hoveredVisual_ ? hoveredVisual_->GetCursor() : LoadCursor(nullptr, IDC_ARROW));
+}
+
+void Window::UpdateHover(const POINT &point)
+{
+    Visual *hoverTarget = scene_ ? scene_->FindVisualAt(ClientPixelsToDips(point)) : nullptr;
+    if (hoveredVisual_ == hoverTarget)
+    {
+        return;
+    }
+    if (hoveredVisual_)
+    {
+        hoveredVisual_->OnMouseLeave();
+    }
+    hoveredVisual_ = hoverTarget;
+    if (hoveredVisual_)
+    {
+        hoveredVisual_->OnMouseEnter();
+    }
+}
+
+LRESULT Window::OnLeftButtonDown(WPARAM wParam, LPARAM lParam)
+{
+    const POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (!scene_)
+    {
+        return 0;
+    }
+    const PointF dipPoint = ClientPixelsToDips(point);
+    Visual *target = scene_->FindVisualAt(dipPoint);
+    scene_->DismissPopupsForClick(dipPoint, target);
+    target = scene_->FindVisualAt(dipPoint);
+    Visual *focusTarget = scene_->FindFocusableAt(dipPoint);
+    Visual *dispatchTarget = focusTarget ? focusTarget : target;
+    MSIMEUI_DEBUG_LOG("WM_LBUTTONDOWN point=(" << point.x << "," << point.y << ") target=" << target << " focusTarget="
+                                               << focusTarget << " dispatchTarget=" << dispatchTarget);
+    if (focusTarget && focusTarget->IsFocusable())
+    {
+        SetFocusedVisual(focusTarget);
+        if (stealFocusOnClick_)
+        {
+            SetFocus(hwnd_);
+        }
+    }
+    capturedVisual_ = dispatchTarget;
+    if (dispatchTarget && dispatchTarget->OnMouseDown(point, wParam))
+    {
+        SetCapture(hwnd_);
+    }
+    return 0;
 }
 
 bool Window::AdoptExistingHwnd(HWND hwnd)
@@ -315,52 +442,39 @@ LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
-    case WM_LBUTTONDOWN: {
-        const POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        if (scene_)
-        {
-            const PointF dipPoint = ClientPixelsToDips(point);
-            Visual *target = scene_->FindVisualAt(dipPoint);
-            Visual *focusTarget = scene_->FindFocusableAt(dipPoint);
-            scene_->DismissPopupsForClick(dipPoint, target);
-            target = scene_->FindVisualAt(dipPoint);
-            focusTarget = scene_->FindFocusableAt(dipPoint);
-            Visual *dispatchTarget = focusTarget ? focusTarget : target;
-            {
-                std::ostringstream log;
-                log << "WM_LBUTTONDOWN point=(" << point.x << "," << point.y << ") target=" << target
-                    << " focusTarget=" << focusTarget << " dispatchTarget=" << dispatchTarget;
-                DebugLog(log.str());
-            }
-            if (focusTarget && focusTarget->IsFocusable())
-            {
-                SetFocusedVisual(focusTarget);
-                if (stealFocusOnClick_)
-                {
-                    SetFocus(hwnd_);
-                }
-            }
-            capturedVisual_ = dispatchTarget;
-            if (dispatchTarget && dispatchTarget->OnMouseDown(point, wParam))
-            {
-                SetCapture(hwnd_);
-                return 0;
-            }
-        }
-        return 0;
-    }
+    case WM_LBUTTONDOWN:
+    // A class with CS_DBLCLKS turns every second click into this; it is still a press.
+    case WM_LBUTTONDBLCLK:
+        return OnLeftButtonDown(wParam, lParam);
 
     case WM_LBUTTONUP: {
         const POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         Visual *target = capturedVisual_ ? capturedVisual_ : focusedVisual_;
+        capturedVisual_ = nullptr;
         if (target)
         {
             target->OnMouseUp(point, wParam);
         }
-        capturedVisual_ = nullptr;
-        ReleaseCapture();
+        if (GetCapture() == hwnd_)
+        {
+            ReleaseCapture();
+        }
         return 0;
     }
+
+    case WM_CAPTURECHANGED:
+        // Capture taken away mid-press (a modal dialog, Alt+Tab): end the press so the
+        // visual does not stay in its pressed or dragging state.
+        if (reinterpret_cast<HWND>(lParam) != hwnd_ && capturedVisual_)
+        {
+            Visual *target = capturedVisual_;
+            capturedVisual_ = nullptr;
+            POINT point = {};
+            GetCursorPos(&point);
+            ScreenToClient(hwnd_, &point);
+            target->OnMouseUp(point, 0);
+        }
+        return 0;
 
     case WM_RBUTTONUP: {
         const POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -392,24 +506,10 @@ LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
 
         const POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        UpdateCursorForClientPoint(point);
-        Visual *hoverTarget = nullptr;
-        if (scene_)
-        {
-            hoverTarget = scene_->FindVisualAt(ClientPixelsToDips(point));
-        }
-        if (hoveredVisual_ != hoverTarget)
-        {
-            if (hoveredVisual_)
-            {
-                hoveredVisual_->OnMouseLeave();
-            }
-            hoveredVisual_ = hoverTarget;
-            if (hoveredVisual_)
-            {
-                hoveredVisual_->OnMouseEnter();
-            }
-        }
+        // One hit test serves both the hover state and the cursor.
+        UpdateHover(point);
+        Visual *hoverTarget = hoveredVisual_;
+        SetCursor(hoverTarget ? hoverTarget->GetCursor() : LoadCursor(nullptr, IDC_ARROW));
 
         if (capturedVisual_)
         {
@@ -439,6 +539,8 @@ LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEWHEEL:
         if (OnMouseWheel(wParam, lParam))
         {
+            // Content moved under a still cursor.
+            RefreshHover();
             return 0;
         }
         break;
@@ -527,7 +629,10 @@ LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         KillTimer(hwnd_, 1);
-        PostQuitMessage(0);
+        if (quitOnDestroy_)
+        {
+            PostQuitMessage(0);
+        }
         return 0;
 
     default:
@@ -542,11 +647,16 @@ void Window::OnPaint()
     PAINTSTRUCT paint = {};
     BeginPaint(hwnd_, &paint);
 
-    if (deviceResources_.EnsureForWindow(hwnd_))
+    painting_ = true;
+    animationRequested_ = false;
+    frameTimeMs_ = NowMs();
+    if (composition_ ? deviceResources_.EnsureForComposition(hwnd_) : deviceResources_.EnsureForWindow(hwnd_))
     {
         ID2D1RenderTarget *target = deviceResources_.GetRenderTarget();
+        deviceResources_.BeginFrame();
         target->BeginDraw();
-        target->Clear(ThemeManager::GetCurrent().windowBackground);
+        target->SetTextAntialiasMode(textAntialiasMode_);
+        target->Clear(hasBackgroundColor_ ? backgroundColor_ : ThemeManager::GetCurrent().windowBackground);
         if (scene_)
         {
             RECT rc = {};
@@ -556,14 +666,34 @@ void Window::OnPaint()
             scene_->Render(deviceResources_);
         }
 
-        const HRESULT hr = target->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET)
+        HRESULT hr = target->EndDraw();
+        if (SUCCEEDED(hr) && composition_)
+        {
+            hr = deviceResources_.Present();
+        }
+        if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
         {
             deviceResources_.DiscardTarget();
         }
+        else if (FAILED(hr))
+        {
+            MSIMEUI_DEBUG_LOG("Window::OnPaint EndDraw failed hr=0x" << std::hex << static_cast<unsigned long>(hr));
+        }
     }
+    painting_ = false;
 
     EndPaint(hwnd_, &paint);
+    if (animationRequested_)
+    {
+        // The HWND target presents in step with the display; a composition swap chain
+        // does not, so wait for the next composition to pace the animation at the
+        // refresh rate instead of spinning.
+        if (composition_)
+        {
+            DwmFlush();
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 void Window::OnSize()
@@ -644,17 +774,10 @@ void Window::SetFocusedVisual(Visual *visual)
 {
     if (focusedVisual_ == visual)
     {
-        std::ostringstream log;
-        log << "SetFocusedVisual unchanged visual=" << visual;
-        DebugLog(log.str());
         return;
     }
 
-    {
-        std::ostringstream log;
-        log << "SetFocusedVisual old=" << focusedVisual_ << " new=" << visual;
-        DebugLog(log.str());
-    }
+    MSIMEUI_DEBUG_LOG("SetFocusedVisual old=" << focusedVisual_ << " new=" << visual);
 
     if (focusedVisual_)
     {

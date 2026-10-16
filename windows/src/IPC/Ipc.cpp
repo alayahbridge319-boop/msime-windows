@@ -72,12 +72,18 @@ void ScheduleDiagnosticFlushLocked()
     {
         return;
     }
+    // A loader reference, not DllAddRef: the host can unload this TIP without asking DllCanUnloadNow, and a callback
+    // sleeping in here would then return into whatever was mapped at this address next (CS2 crashed in SDL3 that way).
+    HMODULE self = PinThisModuleForCallback();
+    if (!self)
+    {
+        return;
+    }
     diagnosticFlushScheduled = true;
-    DllAddRef();
-    if (!TrySubmitThreadpoolCallback(FlushTsfDiagnosticLogs, nullptr, nullptr))
+    if (!TrySubmitThreadpoolCallback(FlushTsfDiagnosticLogs, self, nullptr))
     {
         diagnosticFlushScheduled = false;
-        DllRelease();
+        FreeLibrary(self);
     }
 }
 
@@ -115,8 +121,10 @@ bool SendDiagnosticBatch(const FanyImeTsfDiagnosticBatchHeader &header, const st
     return writeResult && bytesWritten == frame.size();
 }
 
-void CALLBACK FlushTsfDiagnosticLogs(PTP_CALLBACK_INSTANCE, PVOID)
+void CALLBACK FlushTsfDiagnosticLogs(PTP_CALLBACK_INSTANCE instance, PVOID context)
 {
+    // Released by the thread pool after this function has fully returned.
+    FreeLibraryWhenCallbackReturns(instance, static_cast<HMODULE>(context));
     Sleep(DiagnosticFlushDelayMs);
 
     FanyImeTsfDiagnosticBatchHeader header;
@@ -163,7 +171,6 @@ void CALLBACK FlushTsfDiagnosticLogs(PTP_CALLBACK_INSTANCE, PVOID)
     }
     if (loggingDisabled)
     {
-        DllRelease();
         return;
     }
 
@@ -187,7 +194,6 @@ void CALLBACK FlushTsfDiagnosticLogs(PTP_CALLBACK_INSTANCE, PVOID)
             ScheduleDiagnosticFlushLocked();
         }
     }
-    DllRelease();
 }
 // These tokens fence messages that can outlive a CMetasequoiaIME instance.
 // Per-instance counters can collide after HWND/HANDLE reuse during a rapid
@@ -308,6 +314,22 @@ bool IsValidServerReply(const FanyImeNamedpipeDataToTsf &reply)
     return false;
 }
 
+// Keeps the cache bounded by evicting the oldest request ids, but never the
+// entry just stored: that is the reply a waiter is about to look up.
+void StorePendingReply(uint64_t requestId, const FanyImeNamedpipeDataToTsf &reply)
+{
+    pendingReplies[requestId] = reply;
+    auto oldest = pendingReplies.begin();
+    while (pendingReplies.size() > MaxPendingReplyCount)
+    {
+        if (oldest->first == requestId)
+        {
+            ++oldest;
+        }
+        oldest = pendingReplies.erase(oldest);
+    }
+}
+
 void CachePendingReply(const FanyImeNamedpipeDataToTsf &reply)
 {
     if (reply.msg_type == Global::DataFromServerMsgType::PipeReady ||
@@ -324,11 +346,7 @@ void CachePendingReply(const FanyImeNamedpipeDataToTsf &reply)
         }
         return;
     }
-    pendingReplies[reply.request_id] = reply;
-    while (pendingReplies.size() > MaxPendingReplyCount)
-    {
-        pendingReplies.erase(pendingReplies.begin());
-    }
+    StorePendingReply(reply.request_id, reply);
 }
 
 bool WriteOverlappedWithTimeout(HANDLE hPipeHandle, const void *data, DWORD size, DWORD &bytesWritten)
@@ -489,7 +507,7 @@ bool WritePipeHello(HANDLE hPipeHandle, UINT pipeRole)
             FanyImeProtocol::Hello(GetPipeClientId(), NextProtocolId(nextRequestId),
                                    FanyImeProtocol::Capabilities | FanyImeProtocol::CharacterSetShortcut |
                                        FanyImeProtocol::CompositionRestore | FanyImeProtocol::CaretStateIndicator |
-                                       FanyImeProtocol::TrilingualCycle);
+                                       FanyImeProtocol::TrilingualCycle | FanyImeProtocol::InputStateShortcuts);
         BOOL ret = WriteFile(hPipeHandle, &hello, sizeof(hello), &bytesWritten, NULL);
         // Never authorize keys from merely writing a hello. An old Server
         // without negotiation times out into the existing raw-input fallback.
@@ -965,6 +983,12 @@ bool SupportsTrilingualCycle()
            (negotiatedServerCapabilities & FanyImeProtocol::TrilingualCycle) != 0;
 }
 
+bool SupportsInputStateShortcuts()
+{
+    return hPipe && hPipe != INVALID_HANDLE_VALUE &&
+           (negotiatedServerCapabilities & FanyImeProtocol::InputStateShortcuts) != 0;
+}
+
 HANDLE GetToTsfWorkerThreadNamedpipe()
 {
     return hToTsfWorkerThreadPipe;
@@ -1048,9 +1072,9 @@ int WriteDataToNamedPipe(              //
     return 0;
 }
 
-KeyEventSendResult SendKeyEventToUIProcess(uint64_t *requestId)
+KeyEventSendResult SendKeyEventToUIProcess(uint64_t *requestId, unsigned inputStateAction)
 {
-    return SendKeyEventToUIProcessViaNamedPipe(requestId);
+    return SendKeyEventToUIProcessViaNamedPipe(requestId, inputStateAction);
 }
 
 void DebugTsfKeyLatency(const wchar_t *stage, uint64_t requestId, double elapsedMs, HRESULT result)
@@ -1118,6 +1142,43 @@ void DebugTsfIssue47(const wchar_t *stage, uint64_t requestId, UINT code, WCHAR 
                     function, eaten, composing ? 1 : 0, virtualKeyLength, static_cast<unsigned long>(result),
                     correlationToken, Global::current_process_name.empty() ? L"unknown" : Global::current_process_name);
     QueueTsfDiagnosticLog(message);
+}
+
+namespace
+{
+std::wstring DescribeWindowForDiagnostic(HWND hwnd)
+{
+    if (!hwnd)
+    {
+        return L"null";
+    }
+    WCHAR className[128] = {};
+    GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    RECT rect{};
+    GetWindowRect(hwnd, &rect);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return fmt::format(L"{:#x}[{} pid={} visible={} rect=({},{},{},{})]", reinterpret_cast<uintptr_t>(hwnd), className,
+                       pid, IsWindowVisible(hwnd) ? 1 : 0, rect.left, rect.top, rect.right, rect.bottom);
+}
+} // namespace
+
+void QueueTsfHostWindowDiagnostic(_In_z_ const wchar_t *event, const std::wstring &detail)
+{
+    if (!Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+    {
+        return;
+    }
+    GUITHREADINFO gui{};
+    gui.cbSize = sizeof(gui);
+    const BOOL haveGui = GetGUIThreadInfo(GetCurrentThreadId(), &gui);
+    QueueTsfDiagnosticLog(fmt::format(
+        L"[host-window] {} {} process={} fg={} focus={} active={} caret_hwnd={} caret=({},{},{},{}) gui_flags={:#x}",
+        event, detail, Global::current_process_name, DescribeWindowForDiagnostic(GetForegroundWindow()),
+        DescribeWindowForDiagnostic(haveGui ? gui.hwndFocus : nullptr),
+        DescribeWindowForDiagnostic(haveGui ? gui.hwndActive : nullptr),
+        DescribeWindowForDiagnostic(haveGui ? gui.hwndCaret : nullptr), gui.rcCaret.left, gui.rcCaret.top,
+        gui.rcCaret.right, gui.rcCaret.bottom, gui.flags));
 }
 
 void QueueTsfDiagnosticLog(const std::wstring &line)
@@ -1203,14 +1264,16 @@ bool SendToNamedpipe(bool *deliveryAmbiguous = nullptr)
 
     // Tell Server never to raise an IME HWND for UILess hosts (games / fullscreen).
     if (Global::IsUiLessMode() && (packet.event_type == FanyImePipeEventType::KeyEvent ||
+                                   packet.event_type == FanyImePipeEventType::InputStateAction ||
                                    packet.event_type == FanyImePipeEventType::ShowCandidateWnd ||
                                    packet.event_type == FanyImePipeEventType::MoveCandidateWnd ||
                                    packet.event_type == FanyImePipeEventType::HideCandidateWnd))
     {
         packet.modifiers_down |= FanyImePipeFlags::UiLess;
     }
-    if (packet.event_type == FanyImePipeEventType::KeyEvent && Global::SensitiveInputField &&
-        Global::AiContextUploadEnabled.load(std::memory_order_relaxed))
+    if ((packet.event_type == FanyImePipeEventType::KeyEvent ||
+         packet.event_type == FanyImePipeEventType::InputStateAction) &&
+        Global::SensitiveInputField && Global::AiContextUploadEnabled.load(std::memory_order_relaxed))
     {
         packet.modifiers_down |= FanyImePipeFlags::SensitiveField;
     }
@@ -1286,22 +1349,96 @@ bool SendToNamedpipe(bool *deliveryAmbiguous = nullptr)
 
 static struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithDeadline(uint64_t expectedRequestId,
                                                                                bool abortTransportOnTimeout,
-                                                                               DWORD timeoutMs);
+                                                                               DWORD timeoutMs, bool *notReady);
 
 struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithTimeout(uint64_t expectedRequestId,
                                                                        bool abortTransportOnTimeout)
 {
-    return TryReadDataFromServerPipeWithDeadline(expectedRequestId, abortTransportOnTimeout, 50);
+    return TryReadDataFromServerPipeWithDeadline(expectedRequestId, abortTransportOnTimeout, 50, nullptr);
 }
 
 struct FanyImeNamedpipeDataToTsf *TryReadCommitReplyFromServerPipe(uint64_t expectedRequestId)
 {
-    return TryReadDataFromServerPipeWithDeadline(expectedRequestId, true, FANY_IME_COMMIT_REPLY_TIMEOUT_MS);
+    return TryReadDataFromServerPipeWithDeadline(expectedRequestId, true, FANY_IME_COMMIT_REPLY_SESSION_WAIT_MS,
+                                                 nullptr);
+}
+
+// True when a slice has something to consume right now: a cached reply, a
+// frame waiting in the pipe, or a state only the read path can report (no
+// request id, no pipe, a dead pipe). False means the read would only block.
+static bool HasCommitReplyToRead(uint64_t expectedRequestId)
+{
+    if (expectedRequestId == FANY_IME_NO_REQUEST_ID || pendingReplies.count(expectedRequestId) != 0 ||
+        !IsValidPipeHandle(hFromServerPipe))
+    {
+        return true;
+    }
+    // The reply pipe has no read outstanding between slices, so this is the
+    // same nonblocking probe TryOpenClientPipe uses.
+    DWORD bytesAvailable = 0;
+    return !PeekNamedPipe(hFromServerPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr) || bytesAvailable != 0;
+}
+
+CommitReplyWaitStatus TryReadCommitReplySlice(uint64_t expectedRequestId, ULONGLONG deadlineTick,
+                                              struct FanyImeNamedpipeDataToTsf **reply)
+{
+    constexpr ULONGLONG kWindowMs = FANY_IME_COMMIT_REPLY_TIMEOUT_MS;
+
+    *reply = nullptr;
+    // A slice never blocks the host UI thread: it reads only what is already
+    // in the pipe (zero read timeout) and otherwise yields at once. The timer
+    // between slices is what spaces the polls out.
+    bool notReady = true;
+    struct FanyImeNamedpipeDataToTsf *fetched = nullptr;
+    if (HasCommitReplyToRead(expectedRequestId))
+    {
+        notReady = false;
+        fetched =
+            TryReadDataFromServerPipeWithDeadline(expectedRequestId, /*abortTransportOnTimeout=*/true, 0, &notReady);
+    }
+    if (!notReady)
+    {
+        *reply = fetched;
+        return fetched->msg_type == Global::DataFromServerMsgType::TransportUnavailable
+                   ? CommitReplyWaitStatus::Transport
+                   : CommitReplyWaitStatus::Ready;
+    }
+
+    if (GetTickCount64() < deadlineTick)
+    {
+        return CommitReplyWaitStatus::NotReady;
+    }
+
+    // The total window is over with no reply. The request was delivered, so the
+    // Server may already have committed the selection: take exactly the
+    // transport reset a single blocking miss always took.
+    const ULONGLONG startedAt = deadlineTick >= kWindowMs ? deadlineTick - kWindowMs : 0;
+    DebugTsfKeyLatency(L"reply-id-timeout", expectedRequestId, static_cast<double>(GetTickCount64() - startedAt),
+                       HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    ClosePipeHandleIfValid(hFromServerPipe);
+    RequestNamedpipeReconnect();
+    transportUnavailableReply = {};
+    transportUnavailableReply.msg_type = Global::DataFromServerMsgType::TransportUnavailable;
+    *reply = &transportUnavailableReply;
+    return CommitReplyWaitStatus::Transport;
+}
+
+void CacheCommitReplyForEditSession(uint64_t expectedRequestId, const struct FanyImeNamedpipeDataToTsf &reply)
+{
+    if (expectedRequestId == FANY_IME_UNSOLICITED_REQUEST_ID || expectedRequestId == FANY_IME_NO_REQUEST_ID ||
+        reply.msg_type == Global::DataFromServerMsgType::PipeReady ||
+        FanyImeProtocol::IsNegotiationReply(reply.msg_type))
+    {
+        return;
+    }
+    // Keyed by the request the session asked for, and never the entry evicted
+    // to keep the cache bounded.
+    StorePendingReply(expectedRequestId, reply);
 }
 
 static struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithDeadline(uint64_t expectedRequestId,
                                                                                bool abortTransportOnTimeout,
-                                                                               DWORD timeoutMs)
+                                                                               DWORD timeoutMs, bool *notReady)
 {
     PerfTimer replyWaitTimer;
 
@@ -1359,6 +1496,14 @@ static struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithDeadline(u
             hFromServerPipe, &namedpipeDataFromServer, sizeof(namedpipeDataFromServer), remainingMs, bytesRead);
         if (readResult == OverlappedReadResult::TimedOut)
         {
+            if (notReady)
+            {
+                // A cooperative commit poll: this slice ended with no reply,
+                // but the pipe is healthy and the total window is not over.
+                // Leave the pipe, the reply cache and the composition alone.
+                *notReady = true;
+                return nullptr;
+            }
             DebugTsfKeyLatency(L"reply-wait-timeout", expectedRequestId, replyWaitTimer.ElapsedMs(),
                                HRESULT_FROM_WIN32(ERROR_TIMEOUT));
             if (!abortTransportOnTimeout)
@@ -1421,6 +1566,13 @@ static struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithDeadline(u
     // Server may already have committed a selection, so preserving local
     // composition would split the two state machines. Treat this exactly like
     // a broken transport and schedule a tokenized reset plus local cancel.
+    if (notReady)
+    {
+        // Same as the read-timeout above: a cooperative slice boundary, not a
+        // failure. The reply cache was updated, the pipe stays up.
+        *notReady = true;
+        return nullptr;
+    }
     if (!abortTransportOnTimeout)
     {
         DebugTsfKeyLatency(L"reply-soft-miss", expectedRequestId, replyWaitTimer.ElapsedMs(), S_FALSE);
@@ -1520,7 +1672,7 @@ bool SendToAuxNamedpipe(const std::wstring &pipeData, bool waitForAcknowledgemen
  *   2: FanyShowCandidateWndEvent
  *   3: FanyMoveCandidateWndEvent
  */
-KeyEventSendResult SendKeyEventToUIProcessViaNamedPipe(uint64_t *requestId)
+KeyEventSendResult SendKeyEventToUIProcessViaNamedPipe(uint64_t *requestId, unsigned inputStateAction)
 {
     if (requestId)
     {
@@ -1551,7 +1703,10 @@ KeyEventSendResult SendKeyEventToUIProcessViaNamedPipe(uint64_t *requestId)
     const uint64_t newRequestId = NextProtocolId(nextRequestId);
     namedpipeData = keyPacket;
     namedpipeData.request_id = newRequestId;
-    namedpipeData.event_type = FanyImePipeEventType::KeyEvent;
+    namedpipeData.event_type =
+        inputStateAction ? FanyImePipeEventType::InputStateAction : FanyImePipeEventType::KeyEvent;
+    if (inputStateAction)
+        namedpipeData.keycode = inputStateAction;
     bool deliveryAmbiguous = false;
     if (!SendToNamedpipe(&deliveryAmbiguous))
     {

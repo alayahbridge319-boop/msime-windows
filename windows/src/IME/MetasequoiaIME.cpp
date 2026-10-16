@@ -19,6 +19,7 @@
 #include "Ipc.h"
 #include "CommonUtils.h"
 #include "Global/FanyDefines.h"
+#include "Global/GameCompat.h"
 #include "Utils/FanyUtils.h"
 #include "../Utils/PerfTimer.h"
 #include "MetasequoiaIMEInternal.h"
@@ -303,7 +304,6 @@ CMetasequoiaIME::CMetasequoiaIME()
     _deferredProjectedRawInput.clear();
     _deferredProjectedCaret = 0;
     _deferredProjectedCandidateActive = false;
-    _deferredProjectedUnicodeMode = false;
     _deferredKeyFocusGeneration = 1;
     _deferredKeyDrainPosted = false;
     _serverUnavailableFallbackActive = false;
@@ -346,7 +346,6 @@ CMetasequoiaIME::~CMetasequoiaIME()
         _pCandidateListUIPresenter = nullptr;
     }
     _DrainPendingCandidatePresenterCleanup();
-    DllRelease();
 
     /* 处理线程的清理 */
     if (_pIpcThread)
@@ -375,6 +374,8 @@ CMetasequoiaIME::~CMetasequoiaIME()
     }
     // The owner-aware unbind above already cleared the TLS copies.
     _CloseIpcWakeEvents();
+    // Last: once the count drops, another thread may unload this DLL while code above is still running.
+    DllRelease();
 }
 
 uint64_t CMetasequoiaIME::_CaptureFocusSessionToken() const
@@ -773,7 +774,15 @@ STDAPI CMetasequoiaIME::ActivateEx(ITfThreadMgr *pThreadMgr, TfClientId tfClient
 
     _tfClientId = tfClientId;
     _dwActivateFlags = dwFlags;
-    Global::HostUiLessMode = _IsUiLessMode() ? true : false;
+    Global::current_process_name = GetCurrentProcessName();
+    // With the Valve compatibility name registered the game does draw the candidates; showing ours as well would
+    // give two lists.
+    const bool valveGame = Global::IsUiLessIgnoredProcess(Global::current_process_name);
+    const bool gameCompatName = valveGame && !Global::ReadGameCompatProfileName().empty();
+    Global::IgnoreHostUiLess = valveGame && !gameCompatName;
+    // These games only say so in BeginUIElement, which runs after the first key of a composition has already gone to
+    // the Server without the UI-less flag; that key would then get the Server's HTML candidate page. Known upfront.
+    Global::HostUiLessMode = (_IsUiLessMode() && !Global::IgnoreHostUiLess) || gameCompatName;
     Global::CandidateUiLessMode = false;
     // Match Weasel's activation-time recovery: switching to this TIP is an
     // explicit user request, so revive a missing Server immediately. Merely
@@ -802,8 +811,6 @@ STDAPI CMetasequoiaIME::ActivateEx(ITfThreadMgr *pThreadMgr, TfClientId tfClient
     // InitIpc();
     // TODO: 去掉共享内存，只保留命名管道
     // InitNamedpipe();
-
-    Global::current_process_name = GetCurrentProcessName();
 
     if (!_InitThreadMgrEventSink())
     {
@@ -1076,6 +1083,7 @@ STDAPI CMetasequoiaIME::Deactivate()
         KillTimer(_msgWndHandle, TIMER_DEFERRED_FOCUS_LOSS);
         KillTimer(_msgWndHandle, TIMER_FOCUS_STATUS_RESEND);
         KillTimer(_msgWndHandle, TIMER_FOCUS_CARET_STATE);
+        KillTimer(_msgWndHandle, TIMER_COMMIT_REPLY_POLL);
         // 不同于上面几个：成对标点的重试定时器还带着 _pairedCaretRetryTimerActive
         // 这一份状态，只 KillTimer 会让标志停在 true，消息窗口重建后就再也装不上
         // 定时器了，所以走完整的取消路径。

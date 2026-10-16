@@ -45,6 +45,27 @@ pwsh -File ./Prepare-PackageFiles.ps1 -TargetVersion 1.2.3 -RepoRoot .. `
 - 仓库 `skins\` 下的外部皮肤（除 `default\` 和素材授权为 `UNVERIFIED*` 的）随包装到 `skins\<id>`，完整包和轻量包都带，卸载不删。`Prepare-PackageFiles.ps1` 同时写出 `bundled_skins.manifest`（每行 `id|相对路径|sha256`），安装器在 `PrepareToInstall` 里拿它核对用户机器上的同名目录：文件集合和内容完全一致就直接覆盖，否则先改名成 `<id>.bak`（已有就 `<id>.2.bak`……，不覆盖旧备份）再装。Server 扫描皮肤时跳过 `*.bak` 目录。`tests/bundled-skins.ps1` 把这段 Pascal 编进探针安装器真跑一遍
 - 静默安装用 `/DATADIR="D:\MetasequoiaIME"` 指定；该值在 `PrepareToInstall` 里和向导页走同一套换子目录和校验
 
+### 云候选安装矩阵
+
+在一次性 Windows 测试机上运行完整安装包。每个场景使用独立的数据目录。
+安装后读取注册表 `DataDir`，再检查该目录的 `config.toml`。
+
+| 场景 | 安装前配置 | 向导选择 | 安装后检查 |
+|---|---|---|---|
+| 首次安装 | 默认目录无配置 | 取消云候选 | 最终目录为 `false` |
+| 首次安装并改目录 | 默认目录无配置，新目录为空 | 改目录并取消云候选 | 新目录为 `false` |
+| 目标目录已有配置 | 新目录有安装标记，`cloud_candidates = true` | 改到该目录 | 网络页跳过，配置保持 `true` |
+| 原目录已有配置 | 原目录的 `cloud_candidates = true`，新目录为空 | 升级时改目录 | 网络页跳过，新目录保持 `true` |
+| 原目录已有配置 | 原目录的 `cloud_candidates = false` | 原目录升级 | 网络页跳过，配置保持 `false` |
+| 两处都有配置 | 原目录和新目录都有内容不同的 `config.toml` | 升级时改目录 | 数据目录页直接拦下；静默安装在停进程前停止，两份配置保持原样 |
+| 上次迁移只复制未删除 | 两处 `config.toml` 内容相同 | 重试升级 | 视为同一份，删掉原目录副本后继续 |
+| 配置搬不动 | 原目录 `config.toml` 被占用 | 升级时改目录 | 安装停止，原配置保持原样，不会装上出厂配置 |
+
+写回「不启用云候选」失败时不中止安装（此时文件已落盘，中止只会留下半成品），而是在其他安装后步骤完成后提示用户到设置页手动关闭。
+
+运行 `python installer/tests/test_cloud_choice.py` 检查生产安装器的时序：先查冲突再停进程，数据目录页也查冲突，写回选择排在必需的安装后步骤之后。
+Windows CI 运行 `installer/tests/cloud-choice.ps1`，用 Inno Setup 跑八个隔离场景。探针复用 `cloud_choice.iss` 里的判断、冲突、去重和失败函数，并按生产顺序用同样的 `robocopy /MOVE` 搬 `config.toml`；`MigrateUserDataDir` 里搬词库、皮肤和清理旧目录的部分不在探针里，完整安装包仍按上表在测试机检查。
+
 ## 运行时依赖检查
 
 安装包不携带 WebView2 Runtime 和 VC 运行库——前者有自己的 Evergreen 更新通道，后者是系统级共享组件。缺 VC 运行库 Server 起不来；缺 WebView2 设置页打不开，但默认的 D2D 候选窗（以及表情 / 键盘 / 手写面板，都是 `msimeui` 原生绘制）照常可用，选了 `appearance.ui_backend = "webview2"` 的 Server 启动时检测不到运行时会临时退回 D2D（`FallBackToD2dIfWebView2RuntimeMissing`，不改配置，装好后下次启动自动恢复）。这些故障都出现在安装结束之后，用户看不到任何解释。所以 `msime_setup.iss` 的 `InitializeSetup` 在安装开始前先查一遍，缺哪个就当场说清楚，并给出下载地址。

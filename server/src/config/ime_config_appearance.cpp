@@ -338,6 +338,25 @@ bool SetConfiguredCandidateFixedBadgeStyle(const std::string &style)
     return true;
 }
 
+const std::string &GetConfiguredCandidateAiBadgeStyle()
+{
+    return g_candidate_ai_badge_style;
+}
+
+bool SetConfiguredCandidateAiBadgeStyle(const std::string &style)
+{
+    if (!IsValidCandidateAiBadgeStyle(style))
+    {
+        return false;
+    }
+    if (!WriteConfiguredValue("appearance", "candidate_ai_badge_style", EscapeTomlBasicString(style)))
+    {
+        return false;
+    }
+    g_candidate_ai_badge_style = style;
+    return true;
+}
+
 const std::string &GetConfiguredSettingsWindowLinger()
 {
     return g_settings_window_linger;
@@ -354,5 +373,24 @@ bool SetConfiguredSettingsWindowLinger(const std::string &linger)
         return false;
     }
     g_settings_window_linger = linger;
+    return true;
+}
+
+const std::string &GetConfiguredSettingsUiBackend()
+{
+    return g_settings_ui_backend;
+}
+
+bool SetConfiguredSettingsUiBackend(const std::string &backend)
+{
+    if (!IsValidSettingsUiBackend(backend))
+    {
+        return false;
+    }
+    if (!WriteConfiguredValue("appearance", "settings_ui_backend", EscapeTomlBasicString(backend)))
+    {
+        return false;
+    }
+    g_settings_ui_backend = backend;
     return true;
 }

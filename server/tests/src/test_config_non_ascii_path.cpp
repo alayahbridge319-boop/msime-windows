@@ -106,6 +106,49 @@ TEST_CASE(config_round_trips_under_non_ascii_profile_path)
         InitImeConfig();
         REQUIRE(fs::exists(data_dir / L"config.toml"));
 
+        REQUIRE_EQ(GetConfiguredInputStateShortcuts()[2], std::string("Ctrl+Period"));
+        for (const std::string binding : {"Ctrl+Shift+Period", "Ctrl+Comma", ""})
+        {
+            REQUIRE(SetConfiguredInputStateShortcut(2, binding));
+            InitImeConfig();
+            REQUIRE_EQ(GetConfiguredInputStateShortcuts()[2], binding);
+        }
+        const auto before_invalid_hotkey = ReadText(data_dir / L"config.toml");
+        REQUIRE(!SetConfiguredInputStateShortcut(2, "Ctrl+Shift+KeyF"));
+        REQUIRE(!SetConfiguredInputStateShortcut(2, "Ctrl+Alt+Period"));
+        REQUIRE(!SetConfiguredInputStateShortcut(2, "Alt+KeyJ"));
+        REQUIRE(!SetConfiguredInputStateShortcut(2, "Alt+Shift+KeyJ"));
+        REQUIRE_EQ(ReadText(data_dir / L"config.toml"), before_invalid_hotkey);
+        REQUIRE_EQ(GetConfiguredInputStateShortcuts()[2], std::string());
+        auto manual_config = before_invalid_hotkey;
+        const std::string empty_binding = "toggle_punctuation = \"\"";
+        const auto binding_position = manual_config.find(empty_binding);
+        REQUIRE(binding_position != std::string::npos);
+        manual_config.replace(binding_position, empty_binding.size(), "toggle_punctuation = true");
+        WriteText(data_dir / L"config.toml", manual_config);
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredInputStateShortcuts()[2], std::string("!invalid"));
+        REQUIRE(SetConfiguredInputStateShortcut(2, "Ctrl+Period"));
+        for (const std::size_t index : {0u, 1u, 2u})
+        {
+            const std::string original = GetConfiguredInputStateShortcuts()[index];
+            REQUIRE(SetConfiguredInputStateShortcut(index, ""));
+            InitImeConfig();
+            REQUIRE_EQ(GetConfiguredInputStateShortcuts()[index], std::string());
+            REQUIRE(!SetConfiguredInputStateShortcut(index, "Alt+KeyJ"));
+            REQUIRE(!SetConfiguredInputStateShortcut(index, "Alt+Shift+KeyJ"));
+            REQUIRE(SetConfiguredInputStateShortcut(index, "Ctrl+Shift+KeyG"));
+            InitImeConfig();
+            REQUIRE_EQ(GetConfiguredInputStateShortcuts()[index], std::string("Ctrl+Shift+KeyG"));
+            REQUIRE(SetConfiguredInputStateShortcut(index, original));
+        }
+        REQUIRE(!SetConfiguredInputStateShortcut(2, "Ctrl+Shift+Space"));
+        REQUIRE(SetConfiguredInputStateShortcut(1, ""));
+        REQUIRE(SetConfiguredInputStateShortcut(2, "Ctrl+Shift+Space"));
+        REQUIRE(!SetConfiguredInputStateShortcut(1, "Ctrl+Shift+Space"));
+        REQUIRE(SetConfiguredInputStateShortcut(2, "Ctrl+Period"));
+        REQUIRE(SetConfiguredInputStateShortcut(1, "Ctrl+Shift+Space"));
+
         REQUIRE(SetConfiguredInputMode("japanese"));
         REQUIRE(SetConfiguredInputScheme("wubi"));
         for (const std::string &position : {"top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"})
@@ -143,6 +186,57 @@ TEST_CASE(config_round_trips_under_non_ascii_profile_path)
         REQUIRE(SetConfiguredCandidateFallbackFonts({}));
         InitImeConfig();
         REQUIRE(GetConfiguredCandidateFallbackFonts().empty());
+    }
+
+    fs::remove_all(unique_root, ec);
+}
+
+TEST_CASE(candidate_translation_show_pos_defaults_and_round_trips)
+{
+    namespace fs = std::filesystem;
+    const fs::path unique_root = MakeProfileRoot() / L"translation-pos";
+    const fs::path data_dir = unique_root / L"metasequoiaime";
+    const fs::path config_path = data_dir / L"config.toml";
+    std::error_code ec;
+    fs::remove_all(unique_root, ec);
+    fs::create_directories(data_dir, ec);
+    REQUIRE(!ec);
+
+    {
+        ScopedConfigLocation location(unique_root);
+        // No template: exercise the reader's fallback independently of template merging.
+        WriteText(config_path, "[general]\ncandidate_translations = true\n");
+        InitImeConfig();
+        REQUIRE(GetConfiguredCandidateTranslationShowPos());
+
+        for (const bool show : {false, true, false})
+        {
+            REQUIRE(SetConfiguredCandidateTranslationShowPos(show));
+            REQUIRE_EQ(GetConfiguredCandidateTranslationShowPos(), show);
+            const auto stored = toml::parse(ReadText(config_path));
+            REQUIRE_EQ(stored["general"]["candidate_translation_show_pos"].value_or(!show), show);
+            InitImeConfig();
+            REQUIRE_EQ(GetConfiguredCandidateTranslationShowPos(), show);
+        }
+        for (const bool enabled : {false, true})
+        {
+            REQUIRE(SetConfiguredCandidateTranslationsEnabled(enabled));
+            InitImeConfig();
+            REQUIRE_EQ(GetConfiguredCandidateTranslationsEnabled(), enabled);
+            REQUIRE(!GetConfiguredCandidateTranslationShowPos());
+        }
+
+        for (const std::string value : {"\"false\"", "1", "[]"})
+        {
+            REQUIRE(SetConfiguredCandidateTranslationShowPos(false));
+            WriteText(config_path, "[general]\ncandidate_translation_show_pos = " + value + "\n");
+            InitImeConfig();
+            REQUIRE(GetConfiguredCandidateTranslationShowPos());
+        }
+        REQUIRE(SetConfiguredCandidateTranslationShowPos(false));
+        WriteText(config_path, "[general]\ncandidate_translations = false\n");
+        InitImeConfig();
+        REQUIRE(GetConfiguredCandidateTranslationShowPos());
     }
 
     fs::remove_all(unique_root, ec);
@@ -422,6 +516,90 @@ TEST_CASE(ai_provider_retired_default_model_follows_new_default)
         InitImeConfig();
         REQUIRE_EQ(GetConfiguredAiAssistant().model, defaults.models.at("groq"));
         REQUIRE_EQ(GetConfiguredAiAssistant().models.at("groq"), defaults.models.at("groq"));
+    }
+    fs::remove_all(unique_root, ec);
+}
+
+// [translation].provider 是候选词翻译的唯一来源；旧配置只有三个 enabled 布尔，升级时按
+// niutrans > custom > tencent 推导，并把布尔按 provider 归一，降级回旧版时选择不丢。
+TEST_CASE(translation_provider_migrates_from_legacy_enabled_flags)
+{
+    namespace fs = std::filesystem;
+    const fs::path unique_root = MakeProfileRoot() / L"translation-provider";
+    const fs::path data_dir = unique_root / L"metasequoiaime";
+    std::error_code ec;
+    fs::remove_all(unique_root, ec);
+    SeedTemplate(data_dir);
+    // 旧版配置：没有 [translation]，只有 niutrans.enabled。
+    WriteText(data_dir / L"config.toml",
+              "[niutrans]\nenabled = true\napp_id = \"legacy-app\"\napikey = \"legacy-key\"\n");
+    {
+        ScopedConfigLocation location(unique_root);
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("niutrans"));
+        REQUIRE(GetConfiguredNiuTrans().enabled);
+        REQUIRE(!GetConfiguredCustomTranslation().enabled);
+        REQUIRE_EQ(GetConfiguredTranslation()->niutrans.app_id, std::string("legacy-app"));
+
+        // 非法值被拒绝，保持原值。
+        REQUIRE(!SetConfiguredTranslationString("provider", "not-a-provider"));
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("niutrans"));
+
+        // 切到 AI 辅助：provider 落盘，旧布尔同步写回 false。
+        REQUIRE(SetConfiguredTranslationString("provider", "ai"));
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("ai"));
+        REQUIRE(!GetConfiguredNiuTrans().enabled);
+        REQUIRE(!GetConfiguredCustomTranslation().enabled);
+        REQUIRE(!GetConfiguredTencentTmt().enabled);
+
+        // AI 辅助页改模型后，翻译快照立刻跟着变，不用等重载。
+        REQUIRE(SetConfiguredAiAssistantString("model", "translation-model"));
+        REQUIRE_EQ(GetConfiguredTranslation()->ai.model, std::string("translation-model"));
+
+        // 切到自定义 DeepLX：布尔随之更新。
+        REQUIRE(SetConfiguredTranslationString("provider", "custom"));
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("custom"));
+        REQUIRE(GetConfiguredCustomTranslation().enabled);
+        REQUIRE(!GetConfiguredNiuTrans().enabled);
+
+        // 旧的 enabled 开关改为切换 provider；关掉当前服务回落到腾讯云，并显式打开腾讯云门禁。
+        REQUIRE(SetConfiguredNiuTransBool("enabled", true));
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("niutrans"));
+        REQUIRE(SetConfiguredCustomTranslationBool("enabled", false));
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("niutrans"));
+        REQUIRE(SetConfiguredNiuTransBool("enabled", false));
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("tencent"));
+        REQUIRE(GetConfiguredTencentTmt().enabled);
+    }
+    fs::remove_all(unique_root, ec);
+}
+
+// 旧版只有 tencent_tmt.enabled = true 时才向腾讯云发请求。三个布尔都关的旧配置升级后推导为
+// 腾讯云，但门禁保持关闭，不能因为升级就把候选词发出去。
+TEST_CASE(translation_provider_migration_keeps_tencent_gate)
+{
+    namespace fs = std::filesystem;
+    const fs::path unique_root = MakeProfileRoot() / L"translation-tencent-gate";
+    const fs::path data_dir = unique_root / L"metasequoiaime";
+    std::error_code ec;
+    fs::remove_all(unique_root, ec);
+    SeedTemplate(data_dir);
+    WriteText(data_dir / L"config.toml", "[tencent_tmt]\nenabled = false\nsecret_id = \"AKIDreal\"\n"
+                                         "secret_key = \"real-key\"\n[niutrans]\nenabled = false\n"
+                                         "[custom_translation]\nenabled = false\n");
+    {
+        ScopedConfigLocation location(unique_root);
+        InitImeConfig();
+        REQUIRE_EQ(GetConfiguredTranslation()->provider, std::string("tencent"));
+        REQUIRE(!GetConfiguredTranslation()->tencent.enabled);
+
+        // 用户在设置页明确选择腾讯云后才打开。
+        REQUIRE(SetConfiguredTranslationString("provider", "tencent"));
+        InitImeConfig();
+        REQUIRE(GetConfiguredTranslation()->tencent.enabled);
     }
     fs::remove_all(unique_root, ec);
 }

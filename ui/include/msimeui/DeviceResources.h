@@ -7,18 +7,41 @@
 #include <dxgi1_2.h>
 #include <dwrite.h>
 #include <wincodec.h>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <wrl/client.h>
+
+#include "Types.h"
 
 namespace msimeui
 {
 class DeviceResources
 {
   public:
+    // Marks the start of a frame. Brushes not used since the previous frame become
+    // evictable, and the clip stack used for culling starts over.
+    void BeginFrame();
+
+    // Axis-aligned clip that also feeds IsVisible(), so containers can skip children
+    // that cannot reach the screen. Pair every PushClip with a PopClip.
+    void PushClip(const RectF &rect, D2D1_ANTIALIAS_MODE mode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    void PopClip();
+    // False only when `rect` is entirely outside the current clip.
+    bool IsVisible(const RectF &rect) const;
+
     bool EnsureFactories();
     bool EnsureForWindow(HWND hwnd);
     bool EnsureForComposition(HWND hwnd);
+    // Starts creating the Direct3D device on a background thread; the next composition
+    // target created in the process takes it instead of creating its own. Bringing up
+    // the GPU driver takes a few hundred milliseconds, so a window that calls this early
+    // gets that time back on its first frame.
+    static void PrewarmComposition();
+    // An opaque composition surface ignores alpha, which lets Direct2D draw ClearType
+    // text. Takes effect when the composition surface is next created.
+    void SetCompositionOpaque(bool opaque);
     void Resize(UINT width, UINT height);
     void DiscardTarget();
     HRESULT Present();
@@ -40,13 +63,25 @@ class DeviceResources
                                      DWRITE_TEXT_ALIGNMENT textAlignment, DWRITE_PARAGRAPH_ALIGNMENT paragraphAlignment,
                                      DWRITE_WORD_WRAPPING wordWrapping);
     ID2D1Bitmap *GetBitmapFromFile(const std::wstring &filePath, D2D1_SIZE_F *size = nullptr);
+    // Rasterizes an SVG document (UTF-8 markup) at `sizeDips` for the current DPI and
+    // caches the bitmap. Needs ID2D1DeviceContext5 (Windows 10 1703+); null otherwise.
+    ID2D1Bitmap *GetSvgBitmap(const std::string &markup, const SizeF &sizeDips);
     bool UsesComposition() const;
 
   private:
     struct BrushCacheEntry
     {
-        D2D1_COLOR_F color = {};
         Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+        uint64_t lastFrame = 0;
+    };
+
+    struct SvgCacheEntry
+    {
+        size_t markupHash = 0;
+        std::string markup;
+        SizeF size = {};
+        float dpi = 0.0f;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
     };
 
     struct TextFormatCacheEntry
@@ -68,8 +103,13 @@ class DeviceResources
     };
 
     static constexpr size_t kMaxCachedBitmaps = 4;
+    static constexpr size_t kMaxCachedSvgBitmaps = 96;
+    // Animated colors produce a new brush every frame; past this many, brushes left
+    // over from earlier frames are dropped.
+    static constexpr size_t kBrushCacheSoftLimit = 256;
 
-    static bool IsSameColor(const D2D1_COLOR_F &lhs, const D2D1_COLOR_F &rhs);
+    static uint64_t ColorKey(const D2D1_COLOR_F &color);
+    void TrimBrushCache();
     bool BindCompositionSurface();
     FLOAT DpiForHwnd() const;
 
@@ -79,6 +119,7 @@ class DeviceResources
     UINT pixelWidth_ = 1;
     UINT pixelHeight_ = 1;
     bool composition_ = false;
+    bool compositionOpaque_ = false;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
     Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory1_;
@@ -94,8 +135,11 @@ class DeviceResources
     Microsoft::WRL::ComPtr<IDCompositionDevice> dcompDevice_;
     Microsoft::WRL::ComPtr<IDCompositionTarget> dcompTarget_;
     Microsoft::WRL::ComPtr<IDCompositionVisual> dcompVisual_;
-    std::vector<BrushCacheEntry> brushCache_;
+    std::unordered_map<uint64_t, BrushCacheEntry> brushCache_;
+    uint64_t frame_ = 0;
     std::vector<TextFormatCacheEntry> textFormatCache_;
     std::vector<BitmapCacheEntry> bitmapCache_;
+    std::vector<SvgCacheEntry> svgCache_;
+    std::vector<RectF> clipStack_;
 };
 } // namespace msimeui

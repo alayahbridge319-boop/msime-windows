@@ -6,6 +6,7 @@
 #include "KeyHandlerEditSession.h"
 #include "KeyFocusRecovery.h"
 #include "KeyRepeatGuard.h"
+#include "CapsLockInputPolicy.h"
 #include "stats_collector.h"
 #include "stats_passthrough.h"
 #include "CaretAnchorPolicy.h"
@@ -244,10 +245,32 @@ UINT CaptureIpcModifiers()
     return modifiers;
 }
 
+// Ctrl+Shift+E, without Alt: the only chord a Server without InputStateShortcuts
+// recognizes, sent to it as a plain KeyEvent.
+static bool IsLegacyEnglishInputModeToggle(UINT code, UINT modifiers)
+{
+    return code == 'E' && (modifiers & 0b00000111u) == 0b00000011u;
+}
+
 bool IsEnglishInputModeToggle(UINT code, UINT modifiers)
 {
-    // Ctrl+Shift+E, without Alt.
-    return code == 'E' && (modifiers & 0b00000111u) == 0b00000011u;
+    if ((modifiers & FanyImeKeyChord::Control) == 0)
+        return false;
+    if (!SupportsInputStateShortcuts())
+        return IsLegacyEnglishInputModeToggle(code, modifiers);
+    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000))
+        modifiers |= FanyImeKeyChord::Win;
+    return FanyUtils::ReadConfiguredSwitchLanguageHotkeys().input_state.Match(code, modifiers) ==
+           FanyImeInputStateShortcuts::Action::EnglishCandidates;
+}
+
+// Full-width and punctuation toggles are projected by the preserved-key FIFO, so they
+// may join it while text is pending; otherwise the deferred classifier would hand the
+// chord to the application.
+static bool CanQueueHotkeyBehindBarrier(REFGUID hotkeyGuid)
+{
+    return IsEqualGUID(hotkeyGuid, Global::MetasequoiaIMEGuidPunctuationPreserveKey) ||
+           IsEqualGUID(hotkeyGuid, Global::MetasequoiaIMEGuidDoubleSingleBytePreserveKey);
 }
 
 // Ctrl+Enter, without Shift/Alt/Windows: commit the translation shown to the right of the
@@ -367,6 +390,18 @@ void CMetasequoiaIME::_ApplyCapsLockKeyDownSideEffects(bool capsLockEnabled)
     }
 }
 
+// Whether the thread's toggle already reflects this press differs by host: TSF-aware hosts call TestKeyDown before
+// Windows applies it, IMM hosts such as Minecraft (GLFW / Bedrock) after, and the latter never call OnKeyDown for an
+// uneaten key. Reading the toggle once the key message has been handled is right in both.
+void CMetasequoiaIME::_QueueCapsLockEdge(bool actualKeyDown)
+{
+    if (_msgWndHandle && PostMessage(_msgWndHandle, WM_ApplyCapsLockEdge, 0, 0))
+    {
+        return;
+    }
+    _ApplyCapsLockKeyDownSideEffects(ResultingCapsLockState(actualKeyDown, (GetKeyState(VK_CAPITAL) & 0x0001) != 0));
+}
+
 //+---------------------------------------------------------------------------
 //
 // _IsKeyEaten
@@ -463,12 +498,12 @@ BOOL CMetasequoiaIME::_IsKeyEaten(         //
         }
         // Keep the Chinese compartment open: this only toggles the
         // Server-owned English candidate sub-mode.
-        if (IsEnglishInputModeToggle(*pCodeOut, shortcutModifiers))
+        if (!_serverUnavailableFallbackActive && IsEnglishInputModeToggle(*pCodeOut, shortcutModifiers))
         {
             if (pKeyState)
             {
                 pKeyState->Category = CATEGORY_COMPOSING;
-                pKeyState->Function = FUNCTION_CANCEL;
+                pKeyState->Function = FUNCTION_TOGGLE_ENGLISH_CANDIDATES;
             }
             return TRUE;
         }
@@ -512,16 +547,13 @@ BOOL CMetasequoiaIME::_IsKeyEaten(         //
         const bool isComposing = freshCompositionState ? false : _IsComposing() != FALSE;
         const CANDIDATE_MODE candidateMode = freshCompositionState ? CANDIDATE_NONE : _candidateMode;
         const bool isCapsLockOn = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-        const bool isUppercaseAlphabet = (wch >= L'A' && wch <= L'Z') && (*pCodeOut >= L'A' && *pCodeOut <= L'Z');
         const bool isInputInProgress =
             !freshCompositionState &&
             (isComposing || (candidateMode != CANDIDATE_NONE) ||
              (pCompositionProcessorEngine && pCompositionProcessorEngine->GetVirtualKeyLength() > 0));
 
-        // CapsLock ON + uppercase(没有按 Shift) alphabet:
-        // - start of input: don't eat
-        // - middle of input: eat
-        if (isCapsLockOn && isUppercaseAlphabet && !isInputInProgress)
+        // CapsLock alphabet keys belong to the application unless input is already in progress
+        if (ShouldPassCapsLockAlphabet(isCapsLockOn, isInputInProgress, *pCodeOut, wch))
         {
             return isTouchKeyboardSpecialKeys;
         }
@@ -827,12 +859,10 @@ STDAPI CMetasequoiaIME::OnTestKeyDown(ITfContext *pContext, WPARAM wParam, LPARA
     _capsLockTestKeyDownPending = false;
     if (IsFreshCapsLockKeyDown(wParam, lParam))
     {
-        // TestKeyDown observes the toggle before Windows applies this press.
-        // It may run more than once for one key event; apply the edge once.
+        // TestKeyDown may run more than once for one key event; apply the edge once.
         if (!repeatedTestKeyDown)
         {
-            const bool capsLockEnabled = ResultingCapsLockState(false, (GetKeyState(VK_CAPITAL) & 0x0001) != 0);
-            _ApplyCapsLockKeyDownSideEffects(capsLockEnabled);
+            _QueueCapsLockEdge(false);
         }
         _capsLockTestKeyDownMessageTime = testKeyMessageTime;
         _capsLockTestKeyDownPending = true;
@@ -857,6 +887,17 @@ STDAPI CMetasequoiaIME::OnTestKeyDown(ITfContext *pContext, WPARAM wParam, LPARA
         *pIsEaten = TRUE;
         _NoteKeyForSmartPunctuation(VK_BACK, guardWch, true, FUNCTION_BACKSPACE);
         return S_OK;
+    }
+
+    GUID hotkeyGuid = {};
+    if (_MatchChordInputHotkey(wParam, &hotkeyGuid))
+    {
+        const bool queueable = CanQueueHotkeyBehindBarrier(hotkeyGuid);
+        if (!_HasDeferredKeyBarrier() || queueable)
+        {
+            *pIsEaten = !queueable || _DeferredKeyQueueHasCapacity() ? TRUE : FALSE;
+            return S_OK;
+        }
     }
 
     if (_HasDeferredKeyBarrier())
@@ -913,13 +954,6 @@ STDAPI CMetasequoiaIME::OnTestKeyDown(ITfContext *pContext, WPARAM wParam, LPARA
             // the char proves nothing about the keyboard state.
             _NotePassthroughStatistics(static_cast<UINT>(wParam), deferredWch, false);
         }
-        return S_OK;
-    }
-
-    GUID hotkeyGuid = {};
-    if (_MatchChordInputHotkey(wParam, &hotkeyGuid))
-    {
-        *pIsEaten = TRUE;
         return S_OK;
     }
 
@@ -989,9 +1023,7 @@ STDAPI CMetasequoiaIME::OnKeyDown(ITfContext *pContext, WPARAM wParam, LPARAM lP
     _capsLockTestKeyDownPending = false;
     if (ShouldApplyCapsLockActualKeyDownSideEffects(matchingTestKeyDownHandled, wParam, lParam))
     {
-        // Unlike TestKeyDown, the actual callback observes the resulting toggle state.
-        const bool capsLockEnabled = ResultingCapsLockState(true, (GetKeyState(VK_CAPITAL) & 0x0001) != 0);
-        _ApplyCapsLockKeyDownSideEffects(capsLockEnabled);
+        _QueueCapsLockEdge(true);
     }
     PerfTimer onKeyDownTimer;
     const uint64_t focusGeneration = _deferredKeyFocusGeneration;
@@ -1074,10 +1106,11 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         }
     }
 
-    if (canDefer && translatedWch == nullptr && prevalidatedKeyState == nullptr && !_HasDeferredKeyBarrier())
+    if (canDefer && translatedWch == nullptr && prevalidatedKeyState == nullptr)
     {
         GUID hotkeyGuid = {};
-        if (_MatchChordInputHotkey(wParam, &hotkeyGuid))
+        if (_MatchChordInputHotkey(wParam, &hotkeyGuid) &&
+            (!_HasDeferredKeyBarrier() || CanQueueHotkeyBehindBarrier(hotkeyGuid)))
         {
             _shiftHotkeyArmed = false;
             _ctrlHotkeyArmed = false;
@@ -1304,6 +1337,16 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
             return KeyDownDispatchResult::Complete;
         }
 
+        // Without the capability the toggle goes out as the legacy KeyEvent. A custom
+        // chord queued before a reconnect to such a Server has no legacy form.
+        const bool sendInputStateAction =
+            KeystrokeState.Function == FUNCTION_TOGGLE_ENGLISH_CANDIDATES && SupportsInputStateShortcuts();
+        if (KeystrokeState.Function == FUNCTION_TOGGLE_ENGLISH_CANDIDATES && !sendInputStateAction &&
+            !IsLegacyEnglishInputModeToggle(code, capturedModifiers))
+        {
+            _ResetSessionAfterFailure(DeferredKeyFailureKind::Resync);
+            return KeyDownDispatchResult::Complete;
+        }
         Global::Keycode = code;
         Global::wch = wch;
         Global::ModifiersDown = capturedModifiers;
@@ -1345,7 +1388,11 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
                                 L"", KeyEventPayloadWriteMask(includeCaretAnchor));
 
         PerfTimer sendKeyEventTimer;
-        const KeyEventSendResult sendResult = SendKeyEventToUIProcess(&requestId);
+        const KeyEventSendResult sendResult = SendKeyEventToUIProcess(
+            &requestId,
+            sendInputStateAction ? static_cast<unsigned>(FanyImeInputStateShortcuts::Action::EnglishCandidates) : 0);
+        if (KeystrokeState.Function == FUNCTION_TOGGLE_ENGLISH_CANDIDATES)
+            KeystrokeState.Function = FUNCTION_CANCEL;
         if (KeystrokeState.Function == FUNCTION_TOGGLE_CHARACTER_SET)
         {
             // No document edit or response is needed. In particular, an ambiguous

@@ -474,13 +474,19 @@ void merge_lattice_candidates(std::vector<WordItem> &candidates, const Segments 
         return item;
     };
 
-    // Existing rows include Unigram, so Trigram avoids it before the neural models choose their rows.
-    std::optional<WordItem> trigram_item;
+    // Existing rows include Unigram, so the lattice row avoids it before the neural models choose
+    // their rows. The lattice's own best path is shown as Colocation when octagram is on (single
+    // injection: octagram only affects the decode, so paths.front() is its result), otherwise as
+    // Generated. Selecting Collocation first means the shared sentence keeps that label and the
+    // Generated row is deduplicated away.
+    std::optional<WordItem> lattice_item;
     std::optional<WordItem> keyboard_item;
     std::optional<WordItem> desktop_item;
-    if (options.include_lattice_best)
-        trigram_item = select_distinct(paths, CandidateSource::Generated);
-    const bool trigram_consensus = trigram_item && trigram_item->word == paths.front().sentence &&
+    if (options.include_collocation_best)
+        lattice_item = select_distinct(paths, CandidateSource::Collocation);
+    if (!lattice_item && options.include_lattice_best)
+        lattice_item = select_distinct(paths, CandidateSource::Generated);
+    const bool lattice_consensus = lattice_item && lattice_item->word == paths.front().sentence &&
                                    (source_prefers(keyboard_paths, paths.front().sentence) ||
                                     source_prefers(desktop_paths, paths.front().sentence));
     bool keyboard_before_desktop = false;
@@ -527,13 +533,13 @@ void merge_lattice_candidates(std::vector<WordItem> &candidates, const Segments 
         candidates.erase(unigram_position);
     }
 
-    // Consensus from another source promotes Unigram first and Trigram ahead of neural rows. A
-    // shared neural best belongs to keyboard; when the neural best rows differ, desktop goes first.
+    // Consensus from another source promotes Unigram first and the lattice row ahead of neural rows.
+    // A shared neural best belongs to keyboard; when the neural best rows differ, desktop goes first.
     std::vector<WordItem> extra;
     if (promoted_unigram)
         extra.push_back(std::move(*promoted_unigram));
-    if (trigram_consensus)
-        extra.push_back(std::move(*trigram_item));
+    if (lattice_consensus)
+        extra.push_back(std::move(*lattice_item));
     if (keyboard_before_desktop)
     {
         if (keyboard_item)
@@ -549,8 +555,8 @@ void merge_lattice_candidates(std::vector<WordItem> &candidates, const Segments 
             extra.push_back(std::move(*keyboard_item));
     }
     extra.insert(extra.end(), std::make_move_iterator(other_items.begin()), std::make_move_iterator(other_items.end()));
-    if (trigram_item && !trigram_consensus)
-        extra.push_back(std::move(*trigram_item));
+    if (lattice_item && !lattice_consensus)
+        extra.push_back(std::move(*lattice_item));
     if (extra.empty())
         return;
 

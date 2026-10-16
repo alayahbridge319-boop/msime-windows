@@ -3,6 +3,7 @@
 #endif
 #include "ipc/ipc.h"
 #include "ipc/input_key_policy.h"
+#include "engine/contracts/ipc_negotiation.h"
 #include "statistics/stats_pipe.h"
 #include "tests/includes/test_framework.h"
 
@@ -64,7 +65,8 @@ TEST_CASE(ipc_pipe_ready_is_a_distinct_server_reply)
     REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::VModeChanged, 32u);
     REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::TrilingualCycleChanged, 33u);
     REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::AiContextUploadChanged, 34u);
-    REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::MaxKnown, 34u);
+    REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::UiLessCandidatesChanged, 35u);
+    REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::MaxKnown, 35u);
     REQUIRE(Global::DataFromServerMsgTypeToTsfWorkerThread::FocusSessionReady >
             Global::DataFromServerMsgTypeToTsfWorkerThread::PagingCommaPeriodChanged);
     REQUIRE(Global::DataFromServerMsgTypeToTsfWorkerThread::PipeReady >
@@ -117,12 +119,16 @@ TEST_CASE(ipc_pipe_ready_is_a_distinct_server_reply)
             Global::DataFromServerMsgTypeToTsfWorkerThread::VModeChanged);
     REQUIRE(Global::DataFromServerMsgTypeToTsfWorkerThread::AiContextUploadChanged >
             Global::DataFromServerMsgTypeToTsfWorkerThread::TrilingualCycleChanged);
+    REQUIRE(Global::DataFromServerMsgTypeToTsfWorkerThread::UiLessCandidatesChanged >
+            Global::DataFromServerMsgTypeToTsfWorkerThread::AiContextUploadChanged);
     REQUIRE_EQ(Global::DataFromServerMsgTypeToTsfWorkerThread::MaxKnown,
-               Global::DataFromServerMsgTypeToTsfWorkerThread::AiContextUploadChanged);
+               Global::DataFromServerMsgTypeToTsfWorkerThread::UiLessCandidatesChanged);
 }
 
 TEST_CASE(ipc_client_suspension_is_a_distinct_nonterminal_route_reset)
 {
+    REQUIRE_EQ(FanyImePipeEventType::InputStateAction, 17u);
+    REQUIRE_EQ(FanyImeProtocol::InputStateShortcuts, 1u << 7);
     REQUIRE_EQ(FanyImePipeEventType::ClientActivated, 11u);
     REQUIRE_EQ(FanyImePipeEventType::ClientDeactivated, 12u);
     REQUIRE_EQ(FanyImePipeEventType::StatusSnapshot, 13u);

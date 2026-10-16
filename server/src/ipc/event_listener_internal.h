@@ -33,7 +33,7 @@ namespace event_listener_detail
 using AsyncRequestOrigin = FanyImeIpc::AsyncRequestOrigin;
 
 extern bool g_quick_phrase_triggered;
-extern bool g_unicode_mode_triggered;
+extern bool g_radical_mode_triggered;
 extern bool g_date_time_mode_triggered;
 extern bool g_emoji_mode_triggered;
 extern bool g_kaomoji_mode_triggered;
@@ -74,7 +74,8 @@ void ApplyUiLessFromPacket(const FanyImeNamedpipeData &pipe_data);
 void RequestShowCandidateWindow();
 void HideCandidateWindowAndDropItems();
 bool IsQuickPhraseCompositionActive(const std::string &raw);
-bool IsUnicodeCompositionActive(const std::string &raw);
+// U 模式（部件拆字反查）：唤醒键 U 之后是一串小写 a-z 的部件拼音连写。
+bool IsRadicalCompositionActive(const std::string &raw);
 bool IsDateTimeCompositionActive(const std::string &raw);
 bool IsEmojiCompositionActive(const std::string &raw);
 bool IsKaomojiCompositionActive(const std::string &raw);
@@ -86,6 +87,8 @@ FanyImeVModeInput::Trigger CurrentVModeTrigger();
 bool IsVModeCompositionActive(const std::string &raw);
 void ClearSpecialModeTriggers();
 bool IsSpecialModeCompositionActive(const std::string &raw);
+// 五笔会话里属于 T/V 模式的串：交给引擎时标成字面输入，原样保留、不查码表、不算完整四码。
+bool IsWubiLiteralComposition(const std::string &raw);
 
 void PublishCandidateUiOwner(uint64_t client_id, uint64_t activation_epoch);
 FanyImeIpc::CandidateUiOwner SnapshotCandidateUiOwner();
@@ -219,12 +222,17 @@ void HandleToolbarLanguageToggle(bool from_ime_enabled);
 
 // event_listener.cpp
 bool SendUiLessCompositionToClient(uint64_t client_id, uint64_t activation_epoch, uint64_t request_id);
+// UI-less only: tell the candidate owner that its page changed outside a key reply, so the host redraws the list
+// that digits and Space now commit from. A no-op for clients that draw nothing themselves.
+void PushUiLessCandidatesToOwner();
 
 // 拆分前 event_listener.cpp 里的前置声明，定义分布在各个 event_listener*.cpp。
 void PrepareCandidateList(uint64_t client_id, uint64_t activation_epoch);
 void HandleImeKey(uint64_t client_id, uint64_t activation_epoch, uint64_t request_id);
 void ClearState();
-void ProcessSelectionKey(UINT keycode, uint64_t client_id, uint64_t activation_epoch, int forced_index_in_page = -1);
+// count_first_word = false 时这次上屏不进首词命中率（五笔四码唯一自动上屏：用户没有做选择）。
+void ProcessSelectionKey(UINT keycode, uint64_t client_id, uint64_t activation_epoch, int forced_index_in_page = -1,
+                         bool count_first_word = true);
 void WaitForCandidateRenderSync(UINT keycode);
 void ApplyCloudCandidate(const std::string &candidate, const std::string &pinyin, uint64_t generation,
                          const std::optional<metasequoia::OnlineQuery> &query);

@@ -25,6 +25,11 @@ void QuanpinScheme::set_raw_input(const std::string &raw_input, const std::strin
     key_strokes_.clear();
 }
 
+void QuanpinScheme::set_autocorrect_types(unsigned autocorrect_types)
+{
+    include_correction_aliases_ = quanpin::correction_aliases_enabled(autocorrect_types);
+}
+
 void QuanpinScheme::handle_key(ImeKeyCode vk, ImeModifierMask modifiers_down, ImeCharacter wch)
 {
     if (vk == ImeKey::Backspace)
@@ -104,7 +109,8 @@ QueryRequest QuanpinScheme::build_request() const
     {
         try
         {
-            const auto segments = quanpin::cut_pinyin_by_mode(normalized_source, "correction");
+            const auto segments =
+                quanpin::cut_pinyin_by_mode(normalized_source, "correction", include_correction_aliases_);
             if (!segments.empty())
             {
                 request.normalized_segmentation = quanpin::join_segments(segments.front());

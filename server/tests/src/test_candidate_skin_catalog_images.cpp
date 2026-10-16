@@ -192,3 +192,140 @@ TEST_CASE(candidate_skin_catalog_rejects_invalid_toolbar_tables)
     REQUIRE(LoadFails(L"tb-radius", window + "[toolbar]\ncorner_radius_dip = 40\n"));
     REQUIRE(LoadFails(L"tb-radius-type", window + "[toolbar]\ncorner_radius_dip = \"8px\"\n"));
 }
+
+TEST_CASE(candidate_skin_catalog_reads_v2_features)
+{
+    namespace fs = std::filesystem;
+    const fs::path skins_root =
+        fs::temp_directory_path() / (L"msime-skin-v2-" + std::to_wstring(GetCurrentProcessId())) / L"skins";
+    std::error_code ec;
+    fs::remove_all(skins_root, ec);
+    fs::create_directories(skins_root / L"art" / L"assets", ec);
+    REQUIRE(!ec);
+    for (const wchar_t *image : {L"assets\\border.png", L"assets\\char.png"})
+    {
+        std::ofstream file(skins_root / L"art" / image, std::ios::binary | std::ios::trunc);
+        REQUIRE(file.is_open());
+    }
+    std::ofstream manifest(skins_root / L"art" / L"skin.toml", std::ios::binary | std::ios::trunc);
+    REQUIRE(manifest.is_open());
+    manifest << R"toml(schema_version = 2
+id = "art"
+name = "Art"
+version = "2.0.0"
+base = "fluent"
+
+[supports]
+layouts = ["horizontal"]
+themes = ["dark"]
+
+[candidate_window]
+line_gap_dip = 6
+
+[candidate_window.border_image]
+source = "assets/border.png"
+slice_dip = [16, 44, 16, 0]
+stretch_dip = [16, 90, 16, 0]
+width_dip = [16, 44, 16, 0]
+fill = true
+
+[candidate_window.content_insets_dip]
+top = 4
+right = 130
+bottom = 14
+left = 55
+
+[candidate_window.outer_insets_dip]
+top = 87
+right = 16
+bottom = 4
+left = 0
+
+[[candidate_window.decorations]]
+image = "assets/char.png"
+anchor = "right"
+offset_x_dip = 10
+offset_y_dip = -15
+width_dip = 149
+height_dip = 161
+z_index = 3
+)toml";
+    manifest.close();
+
+    std::string error;
+    const auto package = CandidateSkinCatalog::Load(skins_root, "art", &error);
+    REQUIRE(error.empty());
+    REQUIRE(package.has_value());
+    REQUIRE_EQ(package->schemaVersion, 2);
+    REQUIRE(package->borderImage.has_value());
+    REQUIRE_EQ(package->borderImage->source, std::string("assets/border.png"));
+    REQUIRE_EQ(package->borderImage->sliceDip.size(), static_cast<size_t>(4));
+    REQUIRE_EQ(package->borderImage->sliceDip[1], 44.0);
+    // stretch_dip 与 slice_dip 分开存：前者才是可拉伸区，渲染时优先用它。
+    REQUIRE_EQ(package->borderImage->stretchDip.size(), static_cast<size_t>(4));
+    REQUIRE_EQ(package->borderImage->stretchDip[1], 90.0);
+    REQUIRE(package->borderImage->fill);
+
+    REQUIRE(package->contentInsetsDip.has_value());
+    REQUIRE_EQ(package->contentInsetsDip->left, 55.0);
+    REQUIRE_EQ(package->contentInsetsDip->right, 130.0);
+
+    REQUIRE(package->lineGapDip.has_value());
+    REQUIRE_EQ(*package->lineGapDip, 6.0);
+
+    REQUIRE(package->outerInsetsDip.has_value());
+    REQUIRE_EQ(package->outerInsetsDip->top, 87.0);
+    REQUIRE_EQ(package->outerInsetsDip->right, 16.0);
+
+    REQUIRE_EQ(package->freeDecorations.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(package->freeDecorations[0].anchor, std::string("right"));
+    REQUIRE_EQ(package->freeDecorations[0].widthDip, 149.0);
+    REQUIRE_EQ(package->freeDecorations[0].zIndex, 3);
+
+    fs::remove_all(skins_root, ec);
+}
+
+TEST_CASE(candidate_skin_catalog_defaults_optional_decoration_keys)
+{
+    namespace fs = std::filesystem;
+    const fs::path skins_root =
+        fs::temp_directory_path() / (L"msime-skin-v2-decor-" + std::to_wstring(GetCurrentProcessId())) / L"skins";
+    std::error_code ec;
+    fs::remove_all(skins_root, ec);
+    fs::create_directories(skins_root / L"art" / L"assets", ec);
+    REQUIRE(!ec);
+    {
+        std::ofstream file(skins_root / L"art" / L"assets" / L"char.png", std::ios::binary | std::ios::trunc);
+        REQUIRE(file.is_open());
+    }
+    std::ofstream manifest(skins_root / L"art" / L"skin.toml", std::ios::binary | std::ios::trunc);
+    REQUIRE(manifest.is_open());
+    // offset_x_dip、offset_y_dip、z_index 都可省略；缺省时不能解引用空节点。
+    manifest << R"toml(schema_version = 2
+id = "art"
+name = "Art"
+version = "2.0.0"
+base = "fluent"
+
+[supports]
+layouts = ["horizontal"]
+themes = ["dark"]
+
+[[candidate_window.decorations]]
+image = "assets/char.png"
+width_dip = 40
+height_dip = 30
+)toml";
+    manifest.close();
+
+    std::string error;
+    const auto package = CandidateSkinCatalog::Load(skins_root, "art", &error);
+    REQUIRE(error.empty());
+    REQUIRE(package.has_value());
+    REQUIRE_EQ(package->freeDecorations.size(), static_cast<size_t>(1));
+    REQUIRE_EQ(package->freeDecorations[0].offsetXDip, 0.0);
+    REQUIRE_EQ(package->freeDecorations[0].offsetYDip, 0.0);
+    REQUIRE_EQ(package->freeDecorations[0].zIndex, 2);
+
+    fs::remove_all(skins_root, ec);
+}

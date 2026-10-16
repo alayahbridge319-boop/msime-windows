@@ -6,6 +6,7 @@ const toggles = vi.hoisted(() => new Map<string, (active: boolean) => void>());
 vi.mock('./shared', () => ({
   applyDropdownValue: vi.fn(),
   applyToggleState: vi.fn(),
+  setCandidateTranslationOptionsDisabled: vi.fn(),
   setFuzzyRuleOptionsDisabled: vi.fn(),
   setSmartPunctuationOptionsDisabled: vi.fn(),
   setupDropdownMenu: vi.fn(),
@@ -17,8 +18,9 @@ vi.mock('./appearance', () => ({ updateCandidatePreviewHelpcode: vi.fn() }));
 vi.mock('./credential-test', () => ({ setupCredentialTest: vi.fn() }));
 
 import { updateConfig } from './config-sync';
-import { setSmartPunctuationOptionsDisabled } from './shared';
-import { setupInput } from './input';
+import { setCandidateTranslationOptionsDisabled, setSmartPunctuationOptionsDisabled } from './shared';
+import { applyTranslationConfig, setupInput } from './input';
+import { isUsableAiAssistantState, setAiAssistantState } from './ai-assistant-state';
 
 class StubElement extends EventTarget {
   classes = new Set<string>();
@@ -36,18 +38,21 @@ class StubElement extends EventTarget {
 
 let expand: StubElement;
 let details: StubElement;
+let aiSummary: { value: string };
 
 beforeEach(() => {
   toggles.clear();
   vi.clearAllMocks();
   expand = new StubElement();
   details = new StubElement();
+  aiSummary = { value: '' };
   vi.stubGlobal('document', {
     querySelectorAll: () => [],
     querySelector: () => null,
     getElementById: (id: string) => {
       if (id === 'smartPunctuationExpand') return expand;
       if (id === 'smartPunctuationDetails') return details;
+      if (id === 'aiTranslationSummary') return aiSummary;
       return null;
     },
     addEventListener: vi.fn()
@@ -79,6 +84,20 @@ it('disables the sub-switches together with the master switch', () => {
   expect(setSmartPunctuationOptionsDisabled).toHaveBeenLastCalledWith(false);
 });
 
+it('reports the translation part-of-speech preference independently of the master switch', () => {
+  for (const show of [false, true]) {
+    toggles.get('candidateTranslationShowPosToggleBtn')?.(show);
+    expect(updateConfig).toHaveBeenLastCalledWith('general.candidate_translation_show_pos', show);
+  }
+  vi.mocked(updateConfig).mockClear();
+  for (const enabled of [false, true]) {
+    toggles.get('candidateTranslationsToggleBtn')?.(enabled);
+    expect(setCandidateTranslationOptionsDisabled).toHaveBeenLastCalledWith(!enabled);
+    expect(updateConfig).toHaveBeenLastCalledWith('general.candidate_translations', enabled);
+  }
+  expect(updateConfig).not.toHaveBeenCalledWith('general.candidate_translation_show_pos', expect.anything());
+});
+
 it('toggles the details container from the section header', () => {
   expand.dispatchEvent(new Event('click'));
   expect(expand.getAttribute('aria-expanded')).toBe('true');
@@ -86,4 +105,28 @@ it('toggles the details container from the section header', () => {
   expand.dispatchEvent(new Event('click'));
   expect(expand.getAttribute('aria-expanded')).toBe('false');
   expect(details.classes.has('open')).toBe(false);
+});
+
+it('shows the AI assistant provider when candidate translation reuses it', () => {
+  setAiAssistantState({
+    provider: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-v4-flash', token: 'sk-test'
+  });
+  applyTranslationConfig({ provider: 'ai' });
+  expect(aiSummary.value).toBe('deepseek · deepseek-v4-flash');
+});
+
+it('follows AI assistant edits made after the snapshot', () => {
+  setupInput();
+  setAiAssistantState({ provider: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'm', token: '' });
+  applyTranslationConfig({ provider: 'ai' });
+  expect(aiSummary.value).toBe('');
+  setAiAssistantState({ provider: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'm', token: 'sk-real' });
+  expect(aiSummary.value).toBe('deepseek · m');
+});
+
+it('treats template placeholder tokens as not configured', () => {
+  for (const token of ['FAKESECRET_e1f2g3h4', '<YOUR_AI_TOKEN_DEEPSEEK>']) {
+    expect(isUsableAiAssistantState({ provider: 'deepseek', endpoint: 'https://x/chat', model: 'm', token })).toBe(false);
+  }
+  expect(isUsableAiAssistantState({ provider: 'custom', endpoint: 'ftp://x', model: 'm', token: 'sk' })).toBe(false);
 });

@@ -216,6 +216,14 @@ void ApplyUiFontFallback(IDWriteFactory *factory, IDWriteTextFormat *format)
                                 nullptr, nullptr, nullptr, 1.0f);
         }
 
+        // Everything else keeps the system fallback; without it a symbol the primary
+        // font lacks (arrows, math, Hangul, ...) had no fallback at all and drew tofu.
+        ComPtr<IDWriteFontFallback> systemFallback;
+        if (SUCCEEDED(factory2->GetSystemFontFallback(systemFallback.GetAddressOf())))
+        {
+            builder->AddMappings(systemFallback.Get());
+        }
+
         ComPtr<IDWriteFontFallback> customFallback;
         if (FAILED(builder->CreateFontFallback(customFallback.GetAddressOf())))
         {

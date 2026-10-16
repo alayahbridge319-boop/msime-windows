@@ -2,6 +2,7 @@ set(TEST_EXECUTABLE_NAME "msimeui-tests")
 
 add_executable(${TEST_EXECUTABLE_NAME}
     src/main.cpp
+    src/test_animation.cpp
     src/test_card_shadow.cpp
     src/test_device_resources.cpp
     src/test_fonts.cpp

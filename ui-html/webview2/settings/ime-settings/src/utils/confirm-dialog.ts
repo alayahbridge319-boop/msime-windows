@@ -37,12 +37,25 @@ export function confirmDialog(message: string, options: ConfirmOptions = {}): Pr
       previousFocus?.focus?.();
       resolve(result);
     };
-    // 捕获阶段处理，免得 Esc 被页面上别的弹窗的全局监听先吃掉
+    // 捕获阶段处理，免得 Esc 被页面上别的弹窗的全局监听先吃掉。
+    // 弹窗是模态的：Tab 只在两个按钮间切换，Enter 只认焦点所在的按钮，
+    // 焦点不在按钮上（比如点了提示文字）时 Enter 什么也不做，绝不默认删除。
     function onKeydown(event: KeyboardEvent): void {
+      if (event.isComposing) return;
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        event.stopPropagation();
+        (document.activeElement === confirm ? cancel : confirm).focus();
+        return;
+      }
       if (event.key !== 'Escape' && event.key !== 'Enter') return;
       event.preventDefault();
       event.stopPropagation();
-      close(event.key === 'Enter');
+      if (event.key === 'Escape') close(false);
+      // 打开弹窗的那次 Enter 按久了会自动重复，不能把重复的按键当成第二次确认
+      else if (event.repeat) return;
+      else if (document.activeElement === confirm) close(true);
+      else if (document.activeElement === cancel) close(false);
     }
     document.addEventListener('keydown', onKeydown, true);
     cancel.addEventListener('click', () => close(false));

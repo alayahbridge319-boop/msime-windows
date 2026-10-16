@@ -1,4 +1,5 @@
 import { updateConfig } from './config-sync';
+import { applyInputStateShortcuts, setupInputStateShortcuts, type ShortcutMetadata } from './shortcut-recorder';
 
 export function applyShortcutConfig(config: {
   switch_language_shift?: boolean;
@@ -6,6 +7,7 @@ export function applyShortcutConfig(config: {
   switch_language_ctrl_alt_space?: boolean;
   toggle_character_set_ctrl_shift_f?: boolean;
   trilingual_cycle?: boolean;
+  input_state_shortcuts?: ShortcutMetadata;
 } | undefined): void {
   if (!config) {
     return;
@@ -30,9 +32,11 @@ export function applyShortcutConfig(config: {
   if (trilingualCycle && typeof config.trilingual_cycle === 'boolean') {
     trilingualCycle.checked = config.trilingual_cycle;
   }
+  applyInputStateShortcuts(config.input_state_shortcuts);
 }
 
 export function setupShortcut(): void {
+  setupInputStateShortcuts();
   const characterSet = document.getElementById('characterSetShortcutCheckbox') as HTMLInputElement | null;
   characterSet?.addEventListener('change', () => {
     updateConfig('keybindings.toggle_character_set_ctrl_shift_f', characterSet.checked);

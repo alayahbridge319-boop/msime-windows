@@ -324,11 +324,80 @@ BOOL ReadConfiguredJapaneseInputMode()
     return FALSE;
 }
 
+LanguageBarVisibility ReadConfiguredLanguageBarVisibility()
+{
+    LanguageBarVisibility result;
+
+    const std::filesystem::path configPath = SharedConfigPath();
+    if (configPath.empty())
+    {
+        return result;
+    }
+
+    std::ifstream input(configPath);
+    if (!input)
+    {
+        return result;
+    }
+
+    bool inLanguageBarSection = false;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos)
+        {
+            line = line.substr(0, comment);
+        }
+        line = TrimAscii(line);
+        if (line.empty())
+        {
+            continue;
+        }
+        if (line.front() == '[' && line.back() == ']')
+        {
+            inLanguageBarSection = (line == "[language_bar]");
+            continue;
+        }
+        if (!inLanguageBarSection)
+        {
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos)
+        {
+            continue;
+        }
+        const std::string key = TrimAscii(line.substr(0, eq));
+        const std::string raw = line.substr(eq + 1);
+        if (key == "enabled")
+        {
+            result.enabled = ParseTomlBool(raw, true);
+        }
+        else if (key == "show_ime_mode")
+        {
+            result.ime_mode = ParseTomlBool(raw, true);
+        }
+        else if (key == "show_double_single_byte")
+        {
+            result.double_single_byte = ParseTomlBool(raw, true);
+        }
+        else if (key == "show_punctuation")
+        {
+            result.punctuation = ParseTomlBool(raw, true);
+        }
+    }
+
+    return result;
+}
+
 namespace
 {
 SwitchLanguageHotkeys ParseSwitchLanguageHotkeys(const std::filesystem::path &configPath)
 {
     SwitchLanguageHotkeys result;
+    std::array<std::string, FanyImeInputStateShortcuts::Definitions.size()> shortcutValues;
+    auto values = FanyImeInputStateShortcuts::Defaults();
     std::ifstream input(configPath);
     if (!input)
     {
@@ -394,7 +463,14 @@ SwitchLanguageHotkeys ParseSwitchLanguageHotkeys(const std::filesystem::path &co
             result.ctrl_alt_space =
                 raw.find("Ctrl+Alt+Space") != std::string::npos || raw.find("Ctrl+Space") != std::string::npos;
         }
+        for (std::size_t i = 0; i < values.size(); ++i)
+            if (key == FanyImeInputStateShortcuts::Definitions[i].key)
+            {
+                shortcutValues[i] = FanyImeKeyChord::TomlString(raw);
+                values[i] = shortcutValues[i];
+            }
     }
+    result.input_state = FanyImeInputStateShortcuts::Resolve(values);
     (void)sawCtrl;
     return result;
 }

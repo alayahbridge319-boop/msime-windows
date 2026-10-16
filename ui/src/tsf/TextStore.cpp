@@ -494,11 +494,11 @@ STDAPI CTextStore::GetTextExt(TsViewCookie vcView, LONG acpStart, LONG acpEnd, R
     ClientToScreen(_pEditor->GetWnd(), (POINT *)&prc->right);
     *pfClipped = FALSE;
 
-    std::ostringstream oss;
-    oss << "CTextStore::GetTextExt editor=" << _pEditor << " acpStart=" << acpStart << " acpEnd=" << acpEnd
-        << " hostRect=(" << rcHost.left << "," << rcHost.top << "," << rcHost.right << "," << rcHost.bottom << ")"
-        << " screenRect=(" << prc->left << "," << prc->top << "," << prc->right << "," << prc->bottom << ")";
-    msimeui::DebugLog(oss.str());
+    MSIMEUI_DEBUG_LOG("CTextStore::GetTextExt editor=" << _pEditor << " acpStart=" << acpStart << " acpEnd=" << acpEnd
+                                                       << " hostRect=(" << rcHost.left << "," << rcHost.top << ","
+                                                       << rcHost.right << "," << rcHost.bottom << ")"
+                                                       << " screenRect=(" << prc->left << "," << prc->top << ","
+                                                       << prc->right << "," << prc->bottom << ")");
 
     return S_OK;
 }
@@ -517,10 +517,8 @@ STDAPI CTextStore::GetScreenExt(TsViewCookie vcView, RECT *prc)
     ClientToScreen(_pEditor->GetWnd(), (POINT *)&prc->left);
     ClientToScreen(_pEditor->GetWnd(), (POINT *)&prc->right);
 
-    std::ostringstream oss;
-    oss << "CTextStore::GetScreenExt editor=" << _pEditor << " screenRect=(" << prc->left << "," << prc->top << ","
-        << prc->right << "," << prc->bottom << ")";
-    msimeui::DebugLog(oss.str());
+    MSIMEUI_DEBUG_LOG("CTextStore::GetScreenExt editor=" << _pEditor << " screenRect=(" << prc->left << "," << prc->top
+                                                         << "," << prc->right << "," << prc->bottom << ")");
 
     return S_OK;
 }

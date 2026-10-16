@@ -91,6 +91,37 @@ class CTextLayout
     }
 
     BOOL Initialize(IDWriteFactory *pDWriteFactory);
+    // CSS letter-spacing in DIPs, added after every character. Takes effect on the next Layout.
+    void SetLetterSpacing(FLOAT dips)
+    {
+        _letterSpacingDips = dips;
+    }
+    // CSS line-height in DIPs for multi-line text (0 = the font's natural spacing). Takes
+    // effect on the next Layout.
+    void SetCssLineHeight(FLOAT dips)
+    {
+        _cssLineHeightDips = dips;
+    }
+    // Multi-line text scrolls vertically inside the layout height, like a <textarea>.
+    FLOAT GetVerticalScroll() const
+    {
+        return _singleLine ? 0.0f : _verticalScrollDips;
+    }
+    FLOAT GetMaxVerticalScroll() const
+    {
+        const FLOAT overflow = _contentHeightDips - _viewportHeightDips;
+        return (_singleLine || overflow < 0.0f) ? 0.0f : overflow;
+    }
+    FLOAT GetContentHeight() const
+    {
+        return _contentHeightDips;
+    }
+    FLOAT GetViewportHeight() const
+    {
+        return _viewportHeightDips;
+    }
+    // Clamped to [0, GetMaxVerticalScroll()]. Returns whether the offset changed.
+    BOOL SetVerticalScroll(FLOAT dips);
     BOOL Layout(const WCHAR *psz, UINT nCnt, const LOGFONT *plf, FLOAT layoutWidthPixels, FLOAT layoutHeightPixels,
                 FLOAT dpiX, FLOAT dpiY, FLOAT paddingLeftPixels = 0.0f, FLOAT paddingTopPixels = 0.0f,
                 FLOAT paddingRightPixels = 0.0f, FLOAT paddingBottomPixels = 0.0f, BOOL singleLine = FALSE);
@@ -101,7 +132,9 @@ class CTextLayout
     UINT InsertionIndexFromPoint(POINT pt);
     UINT ExactCharPosFromPoint(POINT pt);
     UINT FineFirstEndCharPosInLine(UINT uCurPos, BOOL bFirst);
-    void EnsureCaretVisible(UINT nPos);
+    // vertical FALSE only clamps the vertical scroll, so a relayout that didn't move the
+    // caret keeps what the user scrolled to.
+    void EnsureCaretVisible(UINT nPos, BOOL vertical = TRUE);
     void ToggleCaretBlink();
     void ResetCaretBlink();
     void SetCaretVisible(BOOL fVisible)
@@ -158,6 +191,11 @@ class CTextLayout
     IDWriteFactory *_pDWriteFactory;
     IDWriteTextFormat *_pTextFormat;
     IDWriteTextLayout *_pTextLayout;
+    FLOAT _letterSpacingDips = 0.0f;
+    FLOAT _cssLineHeightDips = 0.0f;
+    FLOAT _verticalScrollDips = 0.0f;
+    FLOAT _contentHeightDips = 0.0f;
+    FLOAT _viewportHeightDips = 0.0f;
     int _nLineHeight;
     FLOAT _lineHeightDips;
     FLOAT _layoutWidth;

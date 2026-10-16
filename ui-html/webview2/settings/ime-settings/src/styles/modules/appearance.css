@@ -124,6 +124,17 @@
   min-width: 150px;
 }
 
+/* 设置窗口渲染：与界面渲染同宽，菜单与按钮等宽 */
+#settingsBackendBtn {
+  min-width: 120px;
+}
+
+#settingsBackendMenu {
+  left: 0;
+  right: 0;
+  min-width: 0;
+}
+
 #settingsLingerMenu {
   left: 0;
   right: 0;

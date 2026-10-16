@@ -139,8 +139,21 @@ void run_test(const std::filesystem::path &root)
 
     JapaneseCandidateProvider without_model(metasequoia::path_to_utf8(database),
                                             metasequoia::path_to_utf8(root / "missing.dat"));
-    require(position(query(without_model, "nihongo"), "日本語") == 0,
+    const auto dictionary_only = query(without_model, "nihongo");
+    require(position(dictionary_only, "日本語") == 0,
             "Dictionary-only conversion stopped working without the optional model.");
+
+    // 方案默认是 Quanpin：漏标的日文候选会被调频当拼音词写进拼音日志（#869）。
+    const auto japanese_scheme = [](const std::vector<WordItem> &items) {
+        return std::all_of(items.begin(), items.end(),
+                           [](const WordItem &item) { return item.scheme == SchemeType::JapaneseRomaji; });
+    };
+    require(japanese_scheme(hashi) && japanese_scheme(kana) && japanese_scheme(hyphen) &&
+                japanese_scheme(dictionary_only),
+            "A Japanese candidate was left tagged with the default pinyin scheme.");
+    const auto found = without_model.find_candidate(SchemeType::JapaneseRomaji, "nihongo", "日本語");
+    require(found.has_value() && found->scheme == SchemeType::JapaneseRomaji,
+            "find_candidate returned a Japanese candidate without its scheme.");
 }
 } // namespace
 

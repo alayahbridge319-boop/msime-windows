@@ -2,6 +2,8 @@
 #include <fmt/core.h>
 #include "tests/includes/test_framework.h"
 
+int RunModelPathBenchmark(int argc, char **argv);
+
 namespace test
 {
 std::vector<TestCase> &registry()
@@ -16,8 +18,12 @@ Registrar::Registrar(const char *name, std::function<void()> fn)
 }
 } // namespace test
 
-int main()
+int main(int argc, char **argv)
 {
+    if (argc > 1 && std::string(argv[1]) == "--benchmark-model-path")
+    {
+        return RunModelPathBenchmark(argc - 1, argv + 1);
+    }
     int failures = 0;
     for (const auto &test_case : test::registry())
     {

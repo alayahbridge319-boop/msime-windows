@@ -10,8 +10,7 @@ both default off):
   - transposition: single adjacent-letter swap, sahng -> shang
   - neighbor:      single QWERTY neighbor-key substitution, shabg -> shang
   - deletion:      single dropped letter, shng -> shang
-  - insertion:     single inserted letter that repeats an adjacent key or is
-                   one of its QWERTY neighbors, shangg / sjhang -> shang
+  - insertion:     single inserted QWERTY-neighbor letter, sjhang -> shang
 
 A wrong key may map to several syllables (e.g. ahan -> {shan, zhan}). Such
 ambiguous variants are kept instead of dropped: the runtime disambiguates
@@ -121,8 +120,7 @@ inline constexpr Entry kDeletionEntries[] = {{
 {deletion_entries}
 }};
 
-// Inserted letters: shangg -> shang (doubled g), sjhang -> shang (j is a
-// QWERTY neighbor of h).
+// Inserted letters: sjhang -> shang (j is a QWERTY neighbor of h).
 inline constexpr Entry kInsertionEntries[] = {{
 {insertion_entries}
 }};
@@ -142,6 +140,13 @@ def extract_intact_pinyin_list() -> list[str]:
     if not match:
         raise SystemExit("ERROR: cannot find intact_pinyin_list in " + str(UTILS_PATH))
     return re.findall(r'"([a-z]+)"', match.group(1))
+
+
+def is_jqxy_v_alias(syllable: str) -> bool:
+    # Mirrors quanpin::is_jqxy_v_alias: jv/jve/xvan/... only alias the u spelling.
+    # Nobody types them on purpose, so typos are corrected to the canonical
+    # syllable only; deriving keys from the alias would add noise like nvan -> jvan.
+    return len(syllable) >= 2 and syllable[0] in "jqxy" and syllable[1] == "v"
 
 
 def build_variants(
@@ -169,7 +174,7 @@ def build_variants(
         mapping.setdefault(variant, set()).add(correct)
 
     for syllable in syllables:
-        if len(syllable) < 2:
+        if len(syllable) < 2 or is_jqxy_v_alias(syllable):
             continue
         for variant in make_variants(syllable):
             add_variant(variant, syllable)
@@ -178,24 +183,24 @@ def build_variants(
 
 
 def insertion_variants(syllable: str):
-    # shangg / sjhang -> shang: insert one letter at any position. The inserted
-    # letter must look like a real fat-finger: a repeat of an adjacent key
-    # (double tap) or one of its QWERTY neighbors. Unconstrained insertion
-    # would generate ~60k mostly-unrealistic keys, so position anchors are
-    # start (right neighbor only), end (left neighbor only), and middle (either
-    # side). The <=6 length cap means 6-letter syllables (zhuang) get no
-    # insertion coverage (their variants would be 7 letters, beyond every
-    # legal syllable) -- deliberate, re-evaluate only if evaluation shows a
-    # real gap for 6-letter syllables.
+    # sjhang -> shang: insert one letter at any position. The inserted letter
+    # must look like a real fat-finger: one of the QWERTY neighbors of an
+    # adjacent key. Unconstrained insertion would generate ~60k mostly-
+    # unrealistic keys, so position anchors are start (right neighbor only),
+    # end (left neighbor only), and middle (either side). A double tap (repeat
+    # of the adjacent key itself) is deliberately NOT generated: it is rare
+    # enough that the widened false-positive surface is not worth it. The <=6
+    # length cap means 6-letter syllables (zhuang) get no insertion coverage
+    # (their variants would be 7 letters, beyond every legal syllable) --
+    # deliberate, re-evaluate only if evaluation shows a real gap for 6-letter
+    # syllables.
     for position in range(len(syllable) + 1):
         candidates: set[str] = set()
         if position > 0:
             left = syllable[position - 1]
-            candidates.add(left)
             candidates.update(QWERTY_NEIGHBORS.get(left, ()))
         if position < len(syllable):
             right = syllable[position]
-            candidates.add(right)
             candidates.update(QWERTY_NEIGHBORS.get(right, ()))
         for letter in candidates:
             yield syllable[:position] + letter + syllable[position:]

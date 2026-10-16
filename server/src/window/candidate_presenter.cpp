@@ -8,6 +8,7 @@
 #include "ipc/ipc.h"
 #include "log/candidate_diag_log.h"
 #include "skin/candidate_skin_catalog.h"
+#include "window/candidate_skin_overlay.h"
 #include "utils/common_utils.h"
 #include "utils/ime_utils.h"
 #include "utils/window_utils.h"
@@ -335,6 +336,9 @@ struct CandidatePresenter::Impl
     std::shared_ptr<msimeui::StackPanel> root;
     std::shared_ptr<msimeui::Image> decoration;
     std::shared_ptr<msimeui::Card> card;
+    // 卡片与 v2 挂件层放在同一格里：挂件层测量为 0，格子仍由卡片决定，挂件按 anchor 画到卡片外沿。
+    std::shared_ptr<msimeui::Grid> overlayGrid;
+    std::shared_ptr<CandidateSkinOverlay> skinOverlay;
     // 装饰图与卡片同列：列宽即卡片宽，装饰图在列内按 align 对齐，对应 CSS 里
     // .containerParent 为 fit-content、::before 相对它定位。
     std::shared_ptr<msimeui::StackPanel> cardColumn;
@@ -449,11 +453,19 @@ void CandidatePresenter::RebuildScene()
     impl_->card->SetHorizontalAlignment(msimeui::HorizontalAlignment::Leading);
     impl_->card->AddChild(impl_->body);
     impl_->root->SetHorizontalContentAlignment(msimeui::HorizontalAlignment::Leading);
+    impl_->overlayGrid = std::make_shared<msimeui::Grid>();
+    impl_->overlayGrid->AddRow(msimeui::GridLength{msimeui::GridUnitType::Auto, 1.0f});
+    impl_->overlayGrid->AddColumn(msimeui::GridLength{msimeui::GridUnitType::Auto, 1.0f});
+    impl_->overlayGrid->AddChild(impl_->card, 0, 0);
+    impl_->skinOverlay = std::make_shared<CandidateSkinOverlay>();
+    impl_->skinOverlay->SetHorizontalAlignment(msimeui::HorizontalAlignment::Stretch);
+    impl_->skinOverlay->SetVerticalAlignment(msimeui::VerticalAlignment::Stretch);
+    impl_->overlayGrid->AddChild(impl_->skinOverlay, 0, 0);
     impl_->cardColumn = std::make_shared<msimeui::StackPanel>(0.0f);
     impl_->cardColumn->SetHorizontalAlignment(msimeui::HorizontalAlignment::Leading);
     impl_->cardColumn->SetHorizontalContentAlignment(msimeui::HorizontalAlignment::Stretch);
     impl_->cardColumn->AddChild(impl_->decoration);
-    impl_->cardColumn->AddChild(impl_->card);
+    impl_->cardColumn->AddChild(impl_->overlayGrid);
     impl_->frame = std::make_shared<msimeui::Container>();
     impl_->frame->SetPadding({kShadowPadLeft, kShadowPadTop, kShadowPadRight, kShadowPadBottom});
     impl_->frame->SetChild(impl_->cardColumn);
@@ -503,18 +515,23 @@ void CandidatePresenter::ApplySkin()
         tokens.menuHover = ColorFromRgb(0xECECEC);
     }
     const std::wstring skinsRoot = AssetRoot() + L"\\skins";
+    // 外部皮肤用声明支持当前布局与主题的那一份；不支持或读不出来就回退 fluent，和 WebView2 端同一条规则。
+    const std::string candidateLayout = GetConfiguredCandidateWindowLayout();
+    const std::string candidateTheme = candLight ? "light" : "dark";
     std::optional<CandidateSkinCatalog::Package> package;
     if (!CandidateSkinCatalog::IsBuiltIn(skinId))
     {
-        package = CandidateSkinCatalog::Load(std::filesystem::path(skinsRoot), skinId);
+        package = CandidateSkinCatalog::LoadSupported(std::filesystem::path(skinsRoot), skinId, candidateLayout,
+                                                      candidateTheme);
     }
     // 自定义包的几何取自它的 base 皮肤，与 WebView2 端注入 base 皮肤 CSS 一致；颜色随后由包覆盖。
-    const std::string baseSkin = package ? package->base : skinId;
+    const std::string baseSkin =
+        package ? package->base : (CandidateSkinCatalog::IsBuiltIn(skinId) ? skinId : std::string("fluent"));
     // Built-in skin palettes mirror ui-html/webview2/candwnd/skins/<skin>/;
     // the WebView2 CSS is the reference for both the light and dark values.
     // 横排时高亮内缩于外框，首项、尾项落在卡片四角上的那几个角与卡片同 R，其余角保持
     // itemRadius，对应 CSS 横排的 .pinyin + .row-wrapper / .last-visible 规则。
-    const bool horizontalLayout = GetConfiguredCandidateWindowLayout() == "horizontal";
+    const bool horizontalLayout = candidateLayout == "horizontal";
     // 翻页箭头改变的是场景结构（竖排多一行、横排多一列），开关或排列方式变了就整棵重建，
     // 再往下套用配色与尺寸。重建会清掉指纹，这里补回去。
     const bool pageArrows = CandidateSkinCatalog::ResolvePageArrows(std::filesystem::path(skinsRoot), skinId,
@@ -712,19 +729,19 @@ void CandidatePresenter::ApplySkin()
         tokens.radius = 8.0f;
         tokens.containerPad = std::round(fontSize * 0.3f);
         tokens.itemRadius = 4.0f;
-        tokens.itemExtraHeight = std::round(fontSize * 0.47f);
-        // 序号左端距高亮左缘 0.76em，其中 5 DIP 是列表固定的 textPadLeft。
-        tokens.itemPadLeft = (std::max)(0.0f, std::round(fontSize * 0.76f) - 5.0f);
-        tokens.itemPadRight = std::round(fontSize * 0.9f);
+        tokens.itemExtraHeight = std::round(fontSize * 0.24f);
+        // 序号左端距高亮左缘 0.4em，其中 5 DIP 是列表固定的 textPadLeft。
+        tokens.itemPadLeft = (std::max)(0.0f, std::round(fontSize * 0.4f) - 5.0f);
+        tokens.itemPadRight = std::round(fontSize * 0.3f);
         if (horizontalLayout)
         {
-            tokens.itemGap = std::round(fontSize * 0.28f);
-            tokens.minItemWidth = std::round(fontSize * 4.35f);
+            tokens.itemGap = std::round(fontSize * 0.15f);
+            tokens.minItemWidth = std::round(fontSize * 3.5f);
         }
         tokens.labelScale = 1.0f;
         tokens.labelGap = std::round(fontSize * 0.2f);
-        tokens.selectedBarWidth = (std::max)(3.0f, fontSize * 0.24f);
-        tokens.selectedBarHeightEm = 1.1f;
+        tokens.selectedBarWidth = 3.0f;
+        tokens.selectedBarHeightEm = 0.9f;
         tokens.selectedBarInside = true;
         tokens.trianglePager = true;
         tokens.trimHiddenPreeditGap = true;
@@ -775,8 +792,8 @@ void CandidatePresenter::ApplySkin()
     }
     const CandidateSkinCatalog::CandidateColors *packageColors =
         package ? &(candLight ? package->light : package->dark) : nullptr;
-    const CandidateSkinPalette palette = ResolveCandidateSkinPalette(
-        skinId, candLight, GetConfiguredCandidateTextColor(), packageColors, package ? package->base : std::string{});
+    const CandidateSkinPalette palette =
+        ResolveCandidateSkinPalette(baseSkin, candLight, GetConfiguredCandidateTextColor(), packageColors);
     tokens.surface = palette.surface;
     tokens.border = palette.border;
     tokens.text = palette.text;
@@ -787,7 +804,7 @@ void CandidatePresenter::ApplySkin()
     if (impl_->card)
     {
         const std::string shadow = package ? package->shadow : std::string{};
-        if ((CandidateSkinCatalog::IsBuiltIn(skinId) || package) && shadow != "none")
+        if (shadow != "none")
         {
             // 外部皮肤的 shadow = soft / strong 按同一系数缩放两层不透明度，与 WebView2 端一致。
             const float scale = ShadowAlphaScale(shadow);
@@ -907,9 +924,9 @@ void CandidatePresenter::ApplySkin()
             // 微软拼音式：候选文字色的实心三角，按钮与候选行等高。横排时按钮更宽，前面隔一条分隔线，
             // 与 CSS 的 .page-arrow 同一组 em 尺寸。
             pagerAppearance.glyph = msimeui::PagerArrows::Glyph::Triangle;
-            // 高 0.56em、宽 0.47em，三个角各圆掉高度的四分之一，尖端是钝的。
-            pagerAppearance.glyphSize = fontSize * 0.56f;
-            pagerAppearance.strokeWidth = pagerAppearance.glyphSize * 0.25f;
+            // 高 0.52em、宽 0.44em，三个角各圆掉高度的八分之三，尖端是钝的。
+            pagerAppearance.glyphSize = fontSize * 0.52f;
+            pagerAppearance.strokeWidth = pagerAppearance.glyphSize * 0.375f;
             pagerAppearance.cornerRadius = tokens.itemRadius;
             pagerAppearance.gap = 0.0f;
             pagerAppearance.glyphColor = palette.candidateText;
@@ -917,14 +934,14 @@ void CandidatePresenter::ApplySkin()
             pagerAppearance.buttonHeight = std::round(appearance.itemHeight);
             if (horizontalLayout)
             {
-                pagerAppearance.buttonWidth = std::round(fontSize * 1.73f);
+                pagerAppearance.buttonWidth = std::round(fontSize * 0.96f);
                 pagerAppearance.dividerWidth = 1.0f;
                 pagerAppearance.dividerGap = std::round(fontSize * 0.12f);
                 pagerAppearance.dividerColor = tokens.pagerDivider;
             }
             else
             {
-                pagerAppearance.buttonWidth = std::round(fontSize * 1.2f);
+                pagerAppearance.buttonWidth = std::round(fontSize * 0.81f);
                 pagerAppearance.buttonHeight = std::round(fontSize * 1.2f);
             }
         }
@@ -1000,9 +1017,49 @@ void CandidatePresenter::ApplySkin()
         impl_->decoration->SetHorizontalAlignment(DecorationAlignment(package->decorationAlign));
         framePadTop = (std::max)(0.0f, kShadowPadTop - decorationTopDip_);
     }
+    // v2 挂件挂在卡片外沿，窗口要按 outer_insets_dip 往四边多留出空白，否则立绘被窗口边界裁掉。
+    float framePadLeft = kShadowPadLeft;
+    float framePadRight = kShadowPadRight;
+    float framePadBottom = kShadowPadBottom;
+    if (package && package->outerInsetsDip)
+    {
+        const CandidateSkinCatalog::InsetsDip &outer = *package->outerInsetsDip;
+        framePadLeft += static_cast<float>(outer.left);
+        framePadRight += static_cast<float>(outer.right);
+        framePadTop += static_cast<float>(outer.top);
+        framePadBottom += static_cast<float>(outer.bottom);
+    }
     if (impl_->frame)
     {
-        impl_->frame->SetPadding({kShadowPadLeft, framePadTop, kShadowPadRight, kShadowPadBottom});
+        impl_->frame->SetPadding({framePadLeft, framePadTop, framePadRight, framePadBottom});
+    }
+
+    // v2 自由挂件交给 overlay 层绘制；它测量为 0，不参与卡片布局。
+    if (impl_->skinOverlay)
+    {
+        std::vector<CandidateSkinOverlay::Item> items;
+        if (package)
+        {
+            for (const CandidateSkinCatalog::FreeDecoration &dec : package->freeDecorations)
+            {
+                CandidateSkinOverlay::Item item;
+                item.path = packageRoot + string_to_wstring(dec.image);
+                item.anchor = dec.anchor;
+                item.offsetXDip = static_cast<float>(dec.offsetXDip);
+                item.offsetYDip = static_cast<float>(dec.offsetYDip);
+                item.widthDip = static_cast<float>(dec.widthDip);
+                item.heightDip = static_cast<float>(dec.heightDip);
+                items.push_back(std::move(item));
+            }
+        }
+        impl_->skinOverlay->SetItems(std::move(items));
+    }
+    // v2 的 line_gap_dip 落到预编辑行与候选列表之间的间距上。
+    // TODO(v2 皮肤): 暂定 WebView2 独占。SetSpacing 作用于 body 的全部子元素，竖排时列表与翻页栏之间也会被拉开，
+    // WebView2 只加在 .row.pinyin 下方。
+    if (impl_->body)
+    {
+        impl_->body->SetSpacing(package && package->lineGapDip ? static_cast<float>(*package->lineGapDip) : 2.0f);
     }
 
     msimeui::Brush brush;
@@ -1014,10 +1071,50 @@ void CandidatePresenter::ApplySkin()
     if (impl_->card)
     {
         impl_->card->SetBrush(brush);
-        impl_->card->SetPadding(tokens.containerPad);
+        if (package && package->contentInsetsDip)
+        {
+            // v2 的 content_insets_dip 从面板外缘量起，D2D 侧直接落成卡片内边距（这里没有 CSS 的边框内缘概念）。
+            const CandidateSkinCatalog::InsetsDip &insets = *package->contentInsetsDip;
+            impl_->card->SetPadding(msimeui::Thickness{static_cast<float>(insets.left), static_cast<float>(insets.top),
+                                                       static_cast<float>(insets.right),
+                                                       static_cast<float>(insets.bottom)});
+        }
+        else
+        {
+            impl_->card->SetPadding(tokens.containerPad);
+        }
         impl_->card->SetMinWidth(cardMinWidthDip_);
-        impl_->card->SetBackgroundImage(backgroundPath, BackgroundStretch(package ? package->backgroundFit : ""),
-                                        package ? static_cast<float>(package->backgroundOpacity) : 1.0f);
+        if (package && package->borderImage && !package->borderImage->source.empty())
+        {
+            // v2 九宫格：四边原样、其余拉伸。切片按 1/2/4 值展开成「上右下左」。
+            // TODO(v2 皮肤): 暂定 WebView2 独占。D2D 尚未处理 width_dip 与 fill = false，九宫格仍叠在卡片底色、
+            // 描边与阴影之上并被卡片圆角裁剪；WebView2 会把这些清成透明、圆角归零。
+            const CandidateSkinCatalog::BorderImage &bi = *package->borderImage;
+            const std::vector<double> &values = bi.stretchDip.empty() ? bi.sliceDip : bi.stretchDip;
+            const auto expand4 = [](const std::vector<double> &v, float out[4]) {
+                if (v.size() == 1)
+                    out[0] = out[1] = out[2] = out[3] = static_cast<float>(v[0]);
+                else if (v.size() == 2)
+                {
+                    out[0] = out[2] = static_cast<float>(v[0]);
+                    out[1] = out[3] = static_cast<float>(v[1]);
+                }
+                else
+                {
+                    for (size_t i = 0; i < 4; ++i)
+                        out[i] = i < v.size() ? static_cast<float>(v[i]) : 0.0f;
+                }
+            };
+            float slice[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            expand4(values, slice);
+            impl_->card->SetBackgroundImageNineSlice(packageRoot + string_to_wstring(bi.source), slice[3], slice[0],
+                                                     slice[1], slice[2], 1.0f);
+        }
+        else
+        {
+            impl_->card->SetBackgroundImage(backgroundPath, BackgroundStretch(package ? package->backgroundFit : ""),
+                                            package ? static_cast<float>(package->backgroundOpacity) : 1.0f);
+        }
     }
 }
 

@@ -1,8 +1,10 @@
 #include "engine_input_session.h"
 #include "config/ime_config.h"
 #include "engine/common/helpcode_utils.h"
+#include "engine/contracts/assets/assets.h"
 #include "engine/core/data_path.h"
 #include "engine/core/sentence_association_options.h"
+#include "engine/local_modes/radical_query.h"
 #include "engine/quanpin/quanpin_utils.h"
 #include "settings/neural_model.h"
 
@@ -99,7 +101,13 @@ void EngineInputSession::ApplyConfiguration()
         collocation_enabled ? ResolveCollocationModelPath(GetConfiguredAssocSentenceCollocationModel()) : std::string();
     association.collocation_weight = GetConfiguredAssocSentenceCollocationWeight();
     association.collocation_rerank = collocation_enabled && !association.collocation_model.empty();
-    association.collocation_rerank_weight = GetConfiguredAssocSentenceCollocationRerankWeight();
+    // octagram 六参数（万象现行默认），随配置下发；这些键不进设置页，只由配置文件调。
+    association.collocation_grammar.collocation_max_length = GetConfiguredAssocSentenceCollocationMaxLength();
+    association.collocation_grammar.collocation_min_length = GetConfiguredAssocSentenceCollocationMinLength();
+    association.collocation_grammar.collocation_penalty = GetConfiguredAssocSentenceCollocationPenalty();
+    association.collocation_grammar.non_collocation_penalty = GetConfiguredAssocSentenceCollocationNonPenalty();
+    association.collocation_grammar.weak_collocation_penalty = GetConfiguredAssocSentenceCollocationWeakPenalty();
+    association.collocation_grammar.rear_penalty = GetConfiguredAssocSentenceCollocationRearPenalty();
     session_.set_sentence_association(association);
     session_.set_shuangpin_preedit_uses_raw(GetConfiguredShuangpinPreeditMode() == "shuangpin");
     // 五笔拼音混输与 z 键角色是两个独立设置：混输是「同时给五笔和拼音候选」，z 键角色只管
@@ -268,6 +276,11 @@ void EngineInputSession::set_pinyin_sequence_with_cases(const std::string &pinyi
     return session_.set_pinyin_sequence_with_cases(pinyin_sequence);
 }
 
+void EngineInputSession::set_wubi_literal_input(bool literal)
+{
+    return session_.set_wubi_literal_input(literal);
+}
+
 void EngineInputSession::set_caret(std::optional<std::size_t> caret)
 {
     return session_.set_caret(caret);
@@ -333,6 +346,11 @@ IInputSession::CreatingWordProgress EngineInputSession::update_creating_word_pro
     const SelectionTransition &selection_transition) const
 {
     return session_.update_creating_word_progress(current_pinyin, current_word, selected_word, selection_transition);
+}
+
+std::vector<IInputSession::WordItem> EngineInputSession::query_radical(const std::string &code) const
+{
+    return metasequoia::local_modes::query_radical(paths_.resource(metasequoia::assets::radical_decomposition), code);
 }
 
 std::string EngineInputSession::get_helpcode_annotation(const std::string &word, bool uppercase_all) const

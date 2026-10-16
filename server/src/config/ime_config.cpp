@@ -1,5 +1,6 @@
 #include "window/ui_backend_policy.h"
 #include "window/caret_state_indicator_policy.h"
+#include "window/candidate_view_model.h"
 #include "ime_config.h"
 #include "config/ime_config_internal.h"
 #include <Windows.h>
@@ -20,6 +21,7 @@
 #include "clipboard/clipboard_history.h"
 #include "engine/common/helpcode_utils.h"
 #include "engine/core/data_path.h"
+#include "engine/contracts/input_state_shortcuts.h"
 #include "statistics/stats_store.h"
 #include "voice-input/voice_providers.h"
 
@@ -54,6 +56,13 @@ bool g_switch_language_shift_enabled = true;
 bool g_switch_language_ctrl_enabled = false;
 bool g_switch_language_ctrl_alt_space_enabled = true;
 bool g_character_set_shortcut_enabled = true;
+InputStateShortcutValues g_input_state_shortcuts = [] {
+    InputStateShortcutValues values;
+    const auto defaults = FanyImeInputStateShortcuts::Defaults();
+    for (std::size_t i = 0; i < values.size(); ++i)
+        values[i] = defaults[i];
+    return values;
+}();
 int g_candidate_page_size = 8;
 std::string g_candidate_font = "Noto Sans SC";
 std::string g_candidate_english_font = "Segoe UI";
@@ -129,6 +138,7 @@ int g_floating_toolbar_auto_hide_delay = kFloatingToolbarAutoHideDelayDefault;
 bool g_floating_toolbar_shadow = true;
 bool g_english_candidates_enabled = false;
 bool g_candidate_translations_enabled = false;
+std::atomic_bool g_candidate_translation_show_pos{true};
 int g_english_mixed_input_min_chars = kEnglishMixedInputMinCharsDefault;
 bool g_cloud_candidates_enabled = true;
 // 整句候选来源与去重补位开关：词格、Google 和神经速度档默认开，神经效果档与去重补位默认关。
@@ -138,16 +148,21 @@ bool g_assoc_sentence_neural_desktop = false;
 bool g_assoc_sentence_neural_keyboard = true;
 bool g_assoc_sentence_show_next_on_duplicate = false;
 // octagram 语法模型（八股文 .gram）：总开关默认关；模型 id 默认空（空 = 未选择任何模型）。
-// 权重不进设置页，供配置文件高级调参。
+// 奖励权重与六参数不进设置页，供配置文件高级调参；默认对齐万象现行（wanxiang.schema.yaml）。
 bool g_assoc_sentence_collocation_enabled = false;
 std::string g_assoc_sentence_collocation_model;
-double g_assoc_sentence_collocation_weight = 0.1;
-double g_assoc_sentence_collocation_rerank_weight = 0.05;
+double g_assoc_sentence_collocation_weight = 1.0;
+int g_assoc_sentence_collocation_max_length = 6;
+int g_assoc_sentence_collocation_min_length = 2;
+double g_assoc_sentence_collocation_penalty = -14.0;
+double g_assoc_sentence_collocation_non_penalty = -6.0;
+double g_assoc_sentence_collocation_weak_penalty = -100.0;
+double g_assoc_sentence_collocation_rear_penalty = -18.0;
 // 候选窗整句候选后的来源标签（〔Trigram〕〔神经K〕等），默认不显示。
 bool g_assoc_sentence_source_badge = false;
 bool g_emoji_mixed_input_enabled = false;
 bool g_kaomoji_mixed_input_enabled = false;
-bool g_unicode_mode_enabled = true;
+bool g_radical_mode_enabled = true;
 bool g_quick_phrase_enabled = true;
 bool g_quick_phrase_candidates_enabled = false;
 bool g_quick_phrase_frequency_enabled = true;
@@ -162,6 +177,10 @@ bool g_y_mode_enabled = true;
 bool g_r_mode_enabled = true;
 bool g_v_mode_enabled = true;
 bool g_clipboard_history_enabled = false;
+bool g_language_bar_enabled = true;
+bool g_language_bar_show_ime_mode = true;
+bool g_language_bar_show_double_single_byte = true;
+bool g_language_bar_show_punctuation = true;
 bool g_paging_minus_equal_enabled = true;
 bool g_paging_comma_period_enabled = false;
 bool g_paging_brackets_enabled = false;
@@ -189,7 +208,9 @@ std::string g_candidate_skin = "fluent";
 std::string g_candidate_window_preedit_style = "pinyin";
 bool g_candidate_fixed_badge = true;
 std::string g_candidate_fixed_badge_style = "paperclip";
+std::string g_candidate_ai_badge_style = "robot";
 std::string g_settings_window_linger = "off";
+std::string g_settings_ui_backend = "webview2";
 std::string g_theme_mode = "system";
 std::string g_theme_settings = "follow";
 std::string g_theme_cand = "follow";
@@ -218,6 +239,7 @@ AiAssistantConfig g_ai_assistant;
 TencentTmtConfig g_tencent_tmt;
 CustomTranslationConfig g_custom_translation;
 NiuTransConfig g_niutrans;
+std::string g_translation_provider = "tencent";
 std::mutex g_network_proxy_mutex;
 NetworkProxyConfig g_network_proxy;
 FrequencyAdjustmentConfig g_frequency_adjustment;
@@ -274,10 +296,22 @@ bool IsValidCandidateFixedBadgeStyle(const std::string &style)
     return style == "paperclip" || style == "pushpin" || style == "dot";
 }
 
+// AI 联想徽标样式白名单，理由同上：存 "robot"/"whale" 而不是字面 emoji。
+// 直接查展示层的映射表，避免两份样式列表各自维护。
+bool IsValidCandidateAiBadgeStyle(const std::string &style)
+{
+    return AiSuggestionBadgeGlyph(style) != nullptr;
+}
+
 bool IsValidSettingsWindowLinger(const std::string &linger)
 {
     return linger == "off" || linger == "1m" || linger == "5m" || linger == "10m" || linger == "30m" ||
            linger == "60m" || linger == "forever";
+}
+
+bool IsValidSettingsUiBackend(const std::string &backend)
+{
+    return backend == "webview2" || backend == "d2d";
 }
 
 bool IsValidTranslationTargetLanguage(const std::string &language)
@@ -553,6 +587,8 @@ bool LoadImeConfig()
         }
         g_english_candidates_enabled = tbl["general"]["cn_en_mixed_input"].value_or(false);
         g_candidate_translations_enabled = tbl["general"]["candidate_translations"].value_or(false);
+        g_candidate_translation_show_pos.store(tbl["general"]["candidate_translation_show_pos"].value_or(true),
+                                               std::memory_order_relaxed);
         {
             const int min_chars =
                 tbl["general"]["cn_en_mixed_input_min_chars"].value_or(kEnglishMixedInputMinCharsDefault);
@@ -569,13 +605,21 @@ bool LoadImeConfig()
         g_assoc_sentence_show_next_on_duplicate = tbl["association"]["sentence_show_next_on_duplicate"].value_or(false);
         g_assoc_sentence_collocation_enabled = tbl["association"]["sentence_collocation_enabled"].value_or(false);
         g_assoc_sentence_collocation_model = tbl["association"]["sentence_collocation_model"].value_or(std::string());
-        g_assoc_sentence_collocation_weight = tbl["association"]["sentence_collocation_weight"].value_or(0.1);
-        g_assoc_sentence_collocation_rerank_weight =
-            tbl["association"]["sentence_collocation_rerank_weight"].value_or(0.05);
+        g_assoc_sentence_collocation_weight = tbl["association"]["sentence_collocation_weight"].value_or(1.0);
+        g_assoc_sentence_collocation_max_length = tbl["association"]["sentence_collocation_max_length"].value_or(6);
+        g_assoc_sentence_collocation_min_length = tbl["association"]["sentence_collocation_min_length"].value_or(2);
+        g_assoc_sentence_collocation_penalty = tbl["association"]["sentence_collocation_penalty"].value_or(-14.0);
+        g_assoc_sentence_collocation_non_penalty =
+            tbl["association"]["sentence_collocation_non_penalty"].value_or(-6.0);
+        g_assoc_sentence_collocation_weak_penalty =
+            tbl["association"]["sentence_collocation_weak_penalty"].value_or(-100.0);
+        g_assoc_sentence_collocation_rear_penalty =
+            tbl["association"]["sentence_collocation_rear_penalty"].value_or(-18.0);
         g_assoc_sentence_source_badge = tbl["association"]["sentence_source_badge"].value_or(false);
         g_emoji_mixed_input_enabled = tbl["general"]["emoji_mixed_input"].value_or(false);
         g_kaomoji_mixed_input_enabled = tbl["general"]["kaomoji_mixed_input"].value_or(false);
-        g_unicode_mode_enabled = tbl["utility"]["unicode_mode"].value_or(true);
+        // 改名前的 unicode_mode 作迁移兜底；升级合并已把它搬到新键，新写入只用新键。
+        g_radical_mode_enabled = tbl["utility"]["radical_mode"].value_or(tbl["utility"]["unicode_mode"].value_or(true));
         g_quick_phrase_enabled = tbl["utility"]["quick_phrase"].value_or(true);
         g_quick_phrase_candidates_enabled = tbl["utility"]["quick_phrase_candidates"].value_or(false);
         g_quick_phrase_frequency_enabled = tbl["utility"]["quick_phrase_frequency"].value_or(true);
@@ -598,6 +642,10 @@ bool LoadImeConfig()
             clipboard_history_loaded = true;
             ClipboardMonitor::Sync(g_clipboard_history_enabled);
         }
+        g_language_bar_enabled = tbl["language_bar"]["enabled"].value_or(true);
+        g_language_bar_show_ime_mode = tbl["language_bar"]["show_ime_mode"].value_or(true);
+        g_language_bar_show_double_single_byte = tbl["language_bar"]["show_double_single_byte"].value_or(true);
+        g_language_bar_show_punctuation = tbl["language_bar"]["show_punctuation"].value_or(true);
         const auto legacy_paging_mode = tbl["general"]["paging_mode"].value<std::string>();
         g_paging_minus_equal_enabled =
             tbl["general"]["paging_minus_equal"].value_or(!legacy_paging_mode || *legacy_paging_mode == "-/=");
@@ -655,6 +703,13 @@ bool LoadImeConfig()
             g_switch_language_ctrl_alt_space_enabled =
                 tbl["keybindings"]["switch_language_ctrl_alt_space"].value_or(legacy_ctrl_alt_space);
             g_character_set_shortcut_enabled = tbl["keybindings"]["toggle_character_set_ctrl_shift_f"].value_or(true);
+            for (std::size_t i = 0; i < g_input_state_shortcuts.size(); ++i)
+            {
+                const auto &definition = FanyImeInputStateShortcuts::Definitions[i];
+                const auto value = tbl["keybindings"][definition.key];
+                g_input_state_shortcuts[i] = value ? value.value_or(std::string(FanyImeKeyChord::InvalidValue))
+                                                   : std::string(definition.defaultBinding);
+            }
         }
         {
             const std::string mode = tbl["frequency_adjustment"]["mode"].value_or(std::string("promote"));
@@ -689,8 +744,18 @@ bool LoadImeConfig()
             g_candidate_fixed_badge_style = IsValidCandidateFixedBadgeStyle(badge_style) ? badge_style : "paperclip";
         }
         {
+            // 同上：非法值回退到出厂 🤖，AI 候选不会因此失去来源标识
+            const std::string ai_badge_style =
+                tbl["appearance"]["candidate_ai_badge_style"].value_or(std::string("robot"));
+            g_candidate_ai_badge_style = IsValidCandidateAiBadgeStyle(ai_badge_style) ? ai_badge_style : "robot";
+        }
+        {
             const std::string linger = tbl["appearance"]["settings_window_linger"].value_or(std::string("off"));
             g_settings_window_linger = IsValidSettingsWindowLinger(linger) ? linger : "off";
+        }
+        {
+            const std::string backend = tbl["appearance"]["settings_ui_backend"].value_or(std::string("webview2"));
+            g_settings_ui_backend = IsValidSettingsUiBackend(backend) ? backend : "webview2";
         }
         {
             const std::string theme_mode = tbl["appearance"]["theme_mode"].value_or(std::string("system"));
@@ -926,6 +991,28 @@ bool LoadImeConfig()
         g_niutrans.enabled = tbl["niutrans"]["enabled"].value_or(false);
         g_niutrans.app_id = tbl["niutrans"]["app_id"].value_or(std::string());
         g_niutrans.apikey = tbl["niutrans"]["apikey"].value_or(std::string());
+        // [translation].provider 是唯一来源；旧配置缺这个键时从三个 enabled 布尔推导，
+        // 再把布尔按 provider 归一，保证旧版读回时选择不丢。
+        g_translation_provider = tbl["translation"]["provider"].value_or(std::string());
+        if (IsValidTranslationProvider(g_translation_provider))
+        {
+            // 用户在设置页明确选过，腾讯云的旧门禁跟着选择走。
+            g_tencent_tmt.enabled = g_translation_provider == "tencent";
+        }
+        else
+        {
+            // 推导出腾讯云时保留 tencent_tmt.enabled 原值：旧版要它为 true 才会发请求，
+            // 升级不能替用户把候选词发给腾讯云。
+            if (g_niutrans.enabled)
+                g_translation_provider = "niutrans";
+            else if (g_custom_translation.enabled)
+                g_translation_provider = "custom";
+            else
+                g_translation_provider = "tencent";
+        }
+        g_niutrans.enabled = g_translation_provider == "niutrans";
+        g_custom_translation.enabled = g_translation_provider == "custom";
+        PublishTranslationConfig();
         {
             NetworkProxyConfig proxy;
             proxy.mode = tbl["network"]["proxy_mode"].value_or(std::string("system"));

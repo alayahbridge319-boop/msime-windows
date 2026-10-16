@@ -41,6 +41,21 @@ constexpr size_t kCorrectionPathLimit = 32;
 
 using CorrectionAliases = std::unordered_map<std::string, std::vector<std::string>>;
 
+// 非纠错的拼写归一：ü 归一（jv -> ju）。它不属于手误纠正，永远生效——关掉纠错开关
+// 也要把 jv 当 ju 查库（jv 本身不是合法音节，靠这条归一才能切出来）。n/l 系的
+// nue/lue -> nve/lve 由 normalize_umlaut_aliases 在段级完成，不进这张表。
+const CorrectionAliases &pinyin_normalization_aliases()
+{
+    static const CorrectionAliases kAliases = [] {
+        CorrectionAliases aliases;
+        aliases["jv"].push_back("ju");
+        return aliases;
+    }();
+    return kAliases;
+}
+
+// 手误别名：换位形状（aing/uang/ian/uan/iao/agn/egn/on）、多一个 h、漏一个 g，外加
+// 上面那条 ü 归一。属纠错，按掩码门控（开关关掉时不参与切分）。
 const CorrectionAliases &pinyin_correction_aliases()
 {
     static const CorrectionAliases kAliases = [] {
@@ -77,6 +92,7 @@ const CorrectionAliases &pinyin_correction_aliases()
         add_suffix_aliases("ang", "agn");
         add_suffix_aliases("eng", "egn");
         add_alias("egn", "eng");
+        // ü 归一也留在这张表里，纠错开着时一张表就够；关掉时只查 pinyin_normalization_aliases。
         add_alias("jv", "ju");
         // Missing final g before the next syllable: zhonguo -> zhong guo.
         add_suffix_aliases("ong", "on");
@@ -95,7 +111,7 @@ const CorrectionAliases &pinyin_correction_aliases()
     return kAliases;
 }
 
-std::vector<Segments> cut_one_piece_with_corrections(const std::string &pinyin)
+std::vector<Segments> cut_one_piece_with_corrections(const std::string &pinyin, bool include_correction_aliases)
 {
     struct RankedPath
     {
@@ -105,7 +121,9 @@ std::vector<Segments> cut_one_piece_with_corrections(const std::string &pinyin)
     };
 
     const auto &valid_pinyin = intact_pinyin_set();
-    const auto &aliases = pinyin_correction_aliases();
+    // include=false keeps only the ü normalization (jv -> ju); the hand-mistake
+    // aliases are part of autocorrection and follow its switch.
+    const auto &aliases = include_correction_aliases ? pinyin_correction_aliases() : pinyin_normalization_aliases();
     std::unordered_map<size_t, std::vector<RankedPath>> memo;
 
     const auto solve = [&](auto &&self, size_t index) -> std::vector<RankedPath> {
@@ -200,12 +218,12 @@ std::vector<Segments> cut_one_piece_with_corrections(const std::string &pinyin)
     return paths;
 }
 
-std::vector<Segments> cut_pinyin_with_corrections(const std::string &pinyin)
+std::vector<Segments> cut_pinyin_with_corrections(const std::string &pinyin, bool include_correction_aliases)
 {
     std::vector<Segments> merged_paths = {Segments{}};
     for (const auto &part : split(pinyin, '\''))
     {
-        const auto part_paths = cut_one_piece_with_corrections(part);
+        const auto part_paths = cut_one_piece_with_corrections(part, include_correction_aliases);
         if (part_paths.empty())
         {
             return {};
@@ -942,7 +960,8 @@ Segments cut_pinyin_greedy(const std::string &pinyin, bool intact_only)
     return merged;
 }
 
-std::vector<Segments> cut_pinyin_by_mode(const std::string &pinyin, const std::string &mode)
+std::vector<Segments> cut_pinyin_by_mode(const std::string &pinyin, const std::string &mode,
+                                         bool include_correction_aliases)
 {
     if (mode != "greedy" && mode != "correction")
     {
@@ -959,7 +978,7 @@ std::vector<Segments> cut_pinyin_by_mode(const std::string &pinyin, const std::s
         return {};
     }
 
-    const auto corrected_paths = cut_pinyin_with_corrections(pinyin);
+    const auto corrected_paths = cut_pinyin_with_corrections(pinyin, include_correction_aliases);
     if (!corrected_paths.empty())
     {
         return corrected_paths;
@@ -1063,7 +1082,8 @@ std::vector<KeyedQueryItem> query_initial(sqlite3 *db, const std::string &prefix
 
 QueryResult query_words(const std::string &pinyin, const std::string &db_path, const std::string &mode, int limit)
 {
-    const auto cuts = cut_pinyin_by_mode(pinyin, mode);
+    // 离线查询工具，不挂在任何会话的纠错开关上。
+    const auto cuts = cut_pinyin_by_mode(pinyin, mode, true);
     QueryResult result{pinyin, mode, {}};
     if (cuts.empty())
     {
@@ -1266,29 +1286,18 @@ std::vector<KeyedQueryItem> query_exact_segmentations_keyed_flat(
     return result;
 }
 
-// ü 的两种写法归一到词库存的那一种。intact_pinyin_list() 两种都认，可词库只存
-// 一种：j/q/x/y 后面写 u（ju、jue），l/n 后面写 v（lv、lve）。切出来的 jv、lue
-// 这类音节因此一行都查不到，精确键查询查空，整个词格就断在这里——wo'men'lue'de
-// 解不出任何路径，长句联想直接消失。这不是模糊音降级，lue 和 lve 本来就是同一个
-// 读音的两种拼写，归一化之后仍然是精确匹配。
-const std::string &canonical_syllable(const std::string &syllable)
-{
-    static const std::unordered_map<std::string, std::string> kSpellings = {
-        {"jv", "ju"},   {"qv", "qu"},   {"xv", "xu"},   {"yv", "yu"},   {"jve", "jue"},
-        {"qve", "que"}, {"xve", "xue"}, {"yve", "yue"}, {"lue", "lve"}, {"nue", "nve"},
-    };
-    const auto found = kSpellings.find(syllable);
-    return found == kSpellings.end() ? syllable : found->second;
-}
-
 WordLatticeLookup make_lattice_db_lookup(sqlite3 *db, std::unordered_map<std::string, sqlite3_stmt *> &statement_cache,
                                          int span_limit, metasequoia::FuzzyPinyinOptions fuzzy)
 {
     return [db, &statement_cache, span_limit, fuzzy](const Segments &span) {
+        // ü 的两种写法归一到词库存的那一种。intact_pinyin_list() 两种都认，可词库只存
+        // 一种：切出来的 jv、lue 这类音节一行都查不到，精确键查询查空，整个词格就断在
+        // 这里——wo'men'lue'de 解不出任何路径，长句联想直接消失。这不是模糊音降级，lue
+        // 和 lve 本来就是同一个读音的两种拼写，归一化之后仍然是精确匹配。
         Segments normalized;
         normalized.reserve(span.size());
         for (const auto &syllable : span)
-            normalized.push_back(canonical_syllable(syllable));
+            normalized.push_back(canonical_umlaut_spelling(syllable));
 
         // 词格只收「键与跨度完全相等」的行。query_segments_keyed_flat 是带降级的
         // 查询：精确键查不到就退到前缀区间扫描（key >= "gun'qi" AND key < …），
@@ -1299,7 +1308,7 @@ WordLatticeLookup make_lattice_db_lookup(sqlite3 *db, std::unordered_map<std::st
         for (auto &variant : fuzzy_segmentations(normalized, fuzzy, kFuzzyLatticeVariantLimit))
         {
             for (auto &syllable : variant)
-                syllable = canonical_syllable(syllable);
+                syllable = canonical_umlaut_spelling(std::move(syllable));
             keys.push_back(std::move(variant));
         }
         // 模糊变体与敲出的读音同批查（同表一条 SQL）。LIMIT 按表计，放宽到每个键一份，

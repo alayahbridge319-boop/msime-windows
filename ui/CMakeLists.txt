@@ -21,6 +21,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 add_library(msimeui STATIC
     src/Accordion.cpp
+    src/Animation.cpp
     src/Application.cpp
     src/Brush.cpp
     src/Button.cpp
@@ -52,6 +53,7 @@ add_library(msimeui STATIC
     src/tsf/TextLayout.cpp
     src/tsf/TextStore.cpp
     src/tsf/TsfTextServices.cpp
+    include/msimeui/Animation.h
     include/msimeui/Application.h
     include/msimeui/Brush.h
     src/ControlsInternal.h

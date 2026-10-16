@@ -78,6 +78,12 @@ Boost 是静态链接但没有写进 `vcpkg.json`，所以只能用 classic 模�
 - 设置页前端位于 `ui-html/webview2/settings/ime-settings/`，其中包含 Vite/TypeScript
   工程；设置窗口的原生创建、激活、WebView2 承载及与配置系统的桥接都在本组件的独立进程
   `MetasequoiaImeSettings.exe`（`server/src/settings/`）里，服务端进程内没有内嵌的设置宿主。
+- 设置窗口另有实验性的 Direct2D 前端（`appearance.settings_ui_backend = "d2d"`，或命令行
+  `--d2d`），在 `server/src/settings/native/`，用 msimeui 1:1 复刻上面的网页。它和网页走同一套
+  webview 契约消息与 `HandleClientMessage`，配置读写映射仍只在 `settings_app.cpp`。**改设置页
+  的结构、文案或行为时两个前端要一起改**：每个 `native_page_*.cpp` 对应一个 partial + module。
+  本地调试时可设 `METASEQUOIA_IME_SETTINGS_INSTANCE=<任意名>` 让开发版与已安装的设置窗口并存，
+  并用 `METASEQUOIA_IME_CONFIG_DIR` 隔离配置。
 
 ### 尺寸、坐标与 DPI
 

@@ -26,8 +26,22 @@ std::wstring GetLogPath()
 }
 } // namespace
 
+bool DebugLogEnabled()
+{
+    static const bool enabled = [] {
+        wchar_t value[8] = {};
+        return GetEnvironmentVariableW(L"MSIMEUI_DEBUG_LOG", value, 8) > 0 && value[0] == L'1';
+    }();
+    return enabled;
+}
+
 void DebugLog(const std::string &message)
 {
+    if (!DebugLogEnabled())
+    {
+        return;
+    }
+
     SYSTEMTIME now = {};
     GetLocalTime(&now);
 

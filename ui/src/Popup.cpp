@@ -2,6 +2,7 @@
 // (right-click trigger).
 #include "msimeui/Controls.h"
 
+#include "msimeui/Animation.h"
 #include "msimeui/DeviceResources.h"
 #include "msimeui/Window.h"
 
@@ -125,6 +126,55 @@ void Popup::SetShadowEnabled(bool enabled)
     InvalidateVisual();
 }
 
+void Popup::SetShadowPasses(std::vector<ShadowPass> passes)
+{
+    shadowPasses_ = std::move(passes);
+    InvalidateVisual();
+}
+
+void Popup::SetTopHighlight(const D2D1_COLOR_F &color)
+{
+    topHighlight_ = color;
+    InvalidateVisual();
+}
+
+void Popup::BeginAppearAnimation(double durationMs, float fromOffsetY, float fromScale)
+{
+    appearStartMs_ = NowMs();
+    appearDurationMs_ = durationMs;
+    appearOffsetY_ = fromOffsetY;
+    appearScale_ = fromScale;
+    if (window_)
+    {
+        window_->RequestAnimationFrame();
+    }
+}
+
+void Popup::RenderChrome(DeviceResources &deviceResources)
+{
+    ID2D1RenderTarget *target = deviceResources.GetRenderTarget();
+    if (shadowEnabled_)
+    {
+        if (shadowPasses_.empty() ||
+            !shadowCache_.Render(target, bounds_, cornerRadius_, shadowPasses_.data(), shadowPasses_.size()))
+        {
+            DrawPopupShadow(deviceResources, bounds_, cornerRadius_);
+        }
+    }
+
+    FillRoundedRect(deviceResources, bounds_, cornerRadius_, backgroundFill_, borderColor_, 1.0f);
+    if (topHighlight_.a > 0.0f)
+    {
+        if (ID2D1SolidColorBrush *brush = deviceResources.GetSolidColorBrush(topHighlight_))
+        {
+            const float inset = std::max(cornerRadius_ - 1.0f, 1.0f);
+            target->FillRectangle(
+                D2D1::RectF(bounds_.x + inset, bounds_.y + 1.0f, bounds_.x + bounds_.width - inset, bounds_.y + 2.0f),
+                brush);
+        }
+    }
+}
+
 SizeF Popup::Measure(const SizeF &availableSize)
 {
     const SizeF inner = DeflateSizeLocal(availableSize, padding_);
@@ -154,15 +204,58 @@ void Popup::Render(DeviceResources &deviceResources)
         return;
     }
 
-    if (shadowEnabled_)
+    float progress = 1.0f;
+    if (appearDurationMs_ > 0.0 && window_)
     {
-        DrawPopupShadow(deviceResources, bounds_, cornerRadius_);
+        const double elapsed = window_->GetFrameTime() - appearStartMs_;
+        progress = Easing::EaseOut()(static_cast<float>(std::clamp(elapsed / appearDurationMs_, 0.0, 1.0)));
+        if (elapsed < appearDurationMs_)
+        {
+            window_->RequestAnimationFrame();
+        }
+        else
+        {
+            appearDurationMs_ = 0.0;
+        }
     }
 
-    FillRoundedRect(deviceResources, bounds_, cornerRadius_, backgroundFill_, borderColor_, 1.0f);
+    const bool animating = progress < 1.0f;
+    D2D1_MATRIX_3X2_F previous = D2D1::Matrix3x2F::Identity();
+    if (animating)
+    {
+        if (!layer_ || layerTarget_.Get() != target)
+        {
+            layer_.Reset();
+            layerTarget_ = target;
+            target->CreateLayer(nullptr, layer_.GetAddressOf());
+        }
+        target->GetTransform(&previous);
+        const float scale = Lerp(appearScale_, 1.0f, progress);
+        const float centerX = bounds_.x + bounds_.width * 0.5f;
+        const float centerY = bounds_.y + bounds_.height * 0.5f;
+        target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, D2D1::Point2F(centerX, centerY)) *
+                             D2D1::Matrix3x2F::Translation(0.0f, appearOffsetY_ * (1.0f - progress)) * previous);
+        if (layer_)
+        {
+            target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                    D2D1::IdentityMatrix(), progress),
+                              layer_.Get());
+        }
+    }
+
+    RenderChrome(deviceResources);
     if (child_)
     {
         child_->Render(deviceResources);
+    }
+
+    if (animating)
+    {
+        if (layer_)
+        {
+            target->PopLayer();
+        }
+        target->SetTransform(previous);
     }
 }
 

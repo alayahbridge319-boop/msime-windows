@@ -107,10 +107,8 @@ const WordDictionary &GetWordDictionary()
             dictionary.entries.insert(word);
         }
 
-        std::ostringstream log;
-        log << "Loaded word dictionary entries=" << dictionary.entries.size()
-            << " maxWordLength=" << dictionary.maxWordLength;
-        msimeui::DebugLog(log.str());
+        MSIMEUI_DEBUG_LOG("Loaded word dictionary entries=" << dictionary.entries.size()
+                                                            << " maxWordLength=" << dictionary.maxWordLength);
     });
 
     return dictionary;
@@ -354,7 +352,9 @@ BOOL CTextEditor::MoveSelectionUpDown(BOOL bUp)
     if (bUp)
     {
         pt.y = rc.top - ((rc.bottom - rc.top) / 2);
-        if (pt.y < 0)
+        // rc is scrolled; the first line is the one above which nothing is left.
+        const FLOAT scrollPixels = _layout.GetVerticalScroll() * static_cast<FLOAT>(GetDpiForWindow(_hwnd)) / 96.0f;
+        if (pt.y + static_cast<LONG>(scrollPixels) < 0)
             return FALSE;
     }
     else
@@ -592,8 +592,18 @@ void CTextEditor::Render(ID2D1RenderTarget *pRenderTarget)
         return;
     }
 
-    _layout.Render(pRenderTarget, GetTextBuffer(), GetTextLength(), _nSelStart, _nSelEnd, _pCompositionRenderInfo,
+    _layout.Render(pRenderTarget, DisplayText(), GetTextLength(), _nSelStart, _nSelEnd, _pCompositionRenderInfo,
                    _nCompositionRenderInfo);
+}
+
+const WCHAR *CTextEditor::DisplayText()
+{
+    if (!_maskCharacter)
+    {
+        return GetTextBuffer();
+    }
+    _maskedText.assign(GetTextLength(), _maskCharacter);
+    return _maskedText.c_str();
 }
 
 //----------------------------------------------------------------
@@ -612,11 +622,21 @@ void CTextEditor::UpdateLayout()
     const FLOAT dpi = static_cast<FLOAT>(GetDpiForWindow(_hwnd));
     const LONG width = max(_rcHost.right - _rcHost.left, 1L);
     const LONG height = max(_rcHost.bottom - _rcHost.top, 1L);
-    _layout.Layout(GetTextBuffer(), GetTextLength(), &_lfCurrentFont, static_cast<FLOAT>(width),
-                   static_cast<FLOAT>(height), dpi, dpi, static_cast<FLOAT>(_rcContentPadding.left),
-                   static_cast<FLOAT>(_rcContentPadding.top), static_cast<FLOAT>(_rcContentPadding.right),
-                   static_cast<FLOAT>(_rcContentPadding.bottom), _singleLine);
-    _layout.EnsureCaretVisible(_nSelEnd);
+    const auto layout = [&](LONG gutter) {
+        _layout.Layout(DisplayText(), GetTextLength(), &_lfCurrentFont, static_cast<FLOAT>(width),
+                       static_cast<FLOAT>(height), dpi, dpi, static_cast<FLOAT>(_rcContentPadding.left),
+                       static_cast<FLOAT>(_rcContentPadding.top), static_cast<FLOAT>(_rcContentPadding.right + gutter),
+                       static_cast<FLOAT>(_rcContentPadding.bottom), _singleLine);
+    };
+    layout(0);
+    if (!_singleLine && _scrollbarGutterPixels > 0 && _layout.GetMaxVerticalScroll() > 0.0f)
+    {
+        layout(_scrollbarGutterPixels);
+    }
+    const BOOL moved = GetTextLength() != _laidOutLength || _nSelEnd != _laidOutSelEnd;
+    _laidOutLength = GetTextLength();
+    _laidOutSelEnd = _nSelEnd;
+    _layout.EnsureCaretVisible(_nSelEnd, moved);
 }
 
 void CTextEditor::NotifyLayoutChange()
@@ -722,10 +742,9 @@ void CTextEditor::SetFocusDocumentMgr()
     {
         const HRESULT hr = g_pThreadMgr->SetFocus(_pDocumentMgr);
 
-        std::ostringstream oss;
-        oss << "CTextEditor::SetFocusDocumentMgr editor=" << this << " docMgr=" << _pDocumentMgr << " hwnd=" << GetWnd()
-            << " hr=0x" << std::hex << static_cast<unsigned long>(hr);
-        msimeui::DebugLog(oss.str());
+        MSIMEUI_DEBUG_LOG("CTextEditor::SetFocusDocumentMgr editor=" << this << " docMgr=" << _pDocumentMgr
+                                                                     << " hwnd=" << GetWnd() << " hr=0x" << std::hex
+                                                                     << static_cast<unsigned long>(hr));
     }
 }
 
@@ -738,10 +757,9 @@ void CTextEditor::ClearFocusDocumentMgr()
 
     const HRESULT hr = g_pThreadMgr->SetFocus(nullptr);
 
-    std::ostringstream oss;
-    oss << "CTextEditor::ClearFocusDocumentMgr editor=" << this << " docMgr=" << _pDocumentMgr << " hwnd=" << GetWnd()
-        << " hr=0x" << std::hex << static_cast<unsigned long>(hr);
-    msimeui::DebugLog(oss.str());
+    MSIMEUI_DEBUG_LOG("CTextEditor::ClearFocusDocumentMgr editor=" << this << " docMgr=" << _pDocumentMgr
+                                                                   << " hwnd=" << GetWnd() << " hr=0x" << std::hex
+                                                                   << static_cast<unsigned long>(hr));
 }
 
 //----------------------------------------------------------------

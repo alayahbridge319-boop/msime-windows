@@ -19,6 +19,7 @@
 #include "../core/data_path.h"
 #include "../english/english_dictionary.h"
 #include "../local_modes/local_database.h"
+#include "../quanpin/quanpin_utils.h"
 
 namespace user_dictionary
 {
@@ -126,6 +127,26 @@ bool write_upsert_journal(sqlite3_stmt *stmt, DictionaryKind kind, const std::st
            sqlite3_step(stmt) == SQLITE_DONE;
 }
 
+// 旧版日文模式的调频把罗马音当拼音键写进了拼音日志（#869），回放会把这些日文词插进拼音表。
+// 拼音的自动学习不会产生带假名的词，带假名的非手动条目一律视为这类残留。SQLite 的 GLOB
+// 字符类按码位比较 UTF-8：平假名、片假名、片假名音标扩展、半角片假名。
+constexpr const char *kLearnedKanaPinyinCondition =
+    "dictionary='pinyin' AND operation='upsert' AND user_inserted=0 AND value GLOB '*[ぁ-ゖァ-ヺㇰ-ㇿｦ-ﾝ]*'";
+
+bool has_column(sqlite3 *db, const std::string &table, const std::string &column)
+{
+    auto columns = prepare(db, "PRAGMA table_info(\"" + table + "\")");
+    if (!columns)
+        return false;
+    while (sqlite3_step(columns.get()) == SQLITE_ROW)
+    {
+        const unsigned char *name = sqlite3_column_text(columns.get(), 1);
+        if (name != nullptr && column == reinterpret_cast<const char *>(name))
+            return true;
+    }
+    return false;
+}
+
 bool ensure_schema(sqlite3 *db)
 {
     constexpr const char *sql =
@@ -158,24 +179,11 @@ bool ensure_schema(sqlite3 *db)
     if (sqlite3_exec(db, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
         return false;
 
-    bool has_user_inserted = false;
-    auto columns = prepare(db, "PRAGMA table_info(user_dictionary_operations)");
-    if (!columns)
-        return false;
-    while (sqlite3_step(columns.get()) == SQLITE_ROW)
-    {
-        const unsigned char *name = sqlite3_column_text(columns.get(), 1);
-        if (name != nullptr && std::string(reinterpret_cast<const char *>(name)) == "user_inserted")
-        {
-            has_user_inserted = true;
-            break;
-        }
-    }
-    columns.reset();
-    if (!has_user_inserted && sqlite3_exec(db,
-                                           "ALTER TABLE user_dictionary_operations "
-                                           "ADD COLUMN user_inserted INTEGER NOT NULL DEFAULT 0",
-                                           nullptr, nullptr, nullptr) != SQLITE_OK)
+    if (!has_column(db, "user_dictionary_operations", "user_inserted") &&
+        sqlite3_exec(db,
+                     "ALTER TABLE user_dictionary_operations "
+                     "ADD COLUMN user_inserted INTEGER NOT NULL DEFAULT 0",
+                     nullptr, nullptr, nullptr) != SQLITE_OK)
         return false;
     // Setting user_version is a write, even to the same value. Skip it when it is
     // already current, so opening a connection never waits for another writer.
@@ -263,9 +271,14 @@ bool update_pinyin_weight(sqlite3 *main_db, sqlite3_stmt *journal_upsert, const 
     if (table.empty() || main_db == nullptr || journal_upsert == nullptr)
         return false;
     auto stmt = prepare(main_db, "UPDATE \"" + table + "\" SET weight=?1 WHERE key=?2 AND value=?3");
-    return stmt && sqlite3_bind_int64(stmt.get(), 1, weight) == SQLITE_OK && bind_text(stmt.get(), 2, key) &&
-           bind_text(stmt.get(), 3, value) && sqlite3_step(stmt.get()) == SQLITE_DONE &&
-           write_upsert_journal(journal_upsert, DictionaryKind::Pinyin, key, value, weight);
+    if (!stmt || sqlite3_bind_int64(stmt.get(), 1, weight) != SQLITE_OK || !bind_text(stmt.get(), 2, key) ||
+        !bind_text(stmt.get(), 3, value) || sqlite3_step(stmt.get()) != SQLITE_DONE)
+        return false;
+    // 调频只改已有的行。没改到行时不能记日志：回放的 apply_pinyin 找不到行就插入，
+    // 词库里本不存在的词（如日文候选，#869）会在升级后凭空出现。
+    if (sqlite3_changes(main_db) == 0)
+        return true;
+    return write_upsert_journal(journal_upsert, DictionaryKind::Pinyin, key, value, weight);
 }
 
 bool update_wubi_weight(sqlite3 *main_db, sqlite3_stmt *journal_upsert, const std::string &key,
@@ -522,6 +535,9 @@ bool ensure_user_database(const std::string &user_db_path)
     sqlite3_exec(db.get(),
                  "DELETE FROM user_dictionary_operations "
                  "WHERE dictionary='pinyin' AND operation='upsert' AND weight < 1",
+                 nullptr, nullptr, nullptr);
+    sqlite3_exec(db.get(),
+                 (std::string("DELETE FROM user_dictionary_operations WHERE ") + kLearnedKanaPinyinCondition).c_str(),
                  nullptr, nullptr, nullptr);
     return true;
 }
@@ -1462,8 +1478,7 @@ bool adjust_candidate_ranking(const std::string &main_db_path, const std::string
     }
 
     // One list mixes several entry keys: single-letter and jianpin contexts show
-    // 一/yi next to 有/you, nine-key digits mix whole single-char tables, and a
-    // re-segmentation shows 吉安 (ji'an) inside the jian list. All of them have to
+    // 一/yi next to 有/you, and a re-segmentation shows 吉安 (ji'an) inside the jian list. All of them have to
     // share one scale, because the user's 调频 is "move this above what I can see".
     //
     // The midpoint math below assumes this vector is sorted by weight, descending:
@@ -1684,8 +1699,12 @@ ReplayResult replay(const std::string &user_db_path, const std::string &main_db_
         return result;
     }
     attach_english.reset();
-    auto rows = prepare(journal.get(), "SELECT dictionary,key,value,operation,weight,display"
-                                       " FROM user_dictionary_operations ORDER BY updated_at,rowid");
+    // 回放以只读方式打开日志，不做 schema 迁移；没有 user_inserted 列的旧日志里也不会有手动加的词。
+    const std::string learned_kana = has_column(journal.get(), "user_dictionary_operations", "user_inserted")
+                                         ? std::string("(") + kLearnedKanaPinyinCondition + ")"
+                                         : std::string("0");
+    auto rows = prepare(journal.get(), "SELECT dictionary,key,value,operation,weight,display," + learned_kana +
+                                           " FROM user_dictionary_operations ORDER BY updated_at,rowid");
     if (!rows)
     {
         result.error = "invalid user dictionary database";
@@ -1706,7 +1725,8 @@ ReplayResult replay(const std::string &user_db_path, const std::string &main_db_
         const std::string operation = reinterpret_cast<const char *>(sqlite3_column_text(rows.get(), 3));
         const std::int64_t weight = sqlite3_column_int64(rows.get(), 4);
         const std::string display = reinterpret_cast<const char *>(sqlite3_column_text(rows.get(), 5));
-        if (kind == "pinyin" && operation == "upsert" && weight < 1)
+        const bool learned_kana_pinyin = sqlite3_column_int(rows.get(), 6) != 0;
+        if ((kind == "pinyin" && operation == "upsert" && weight < 1) || learned_kana_pinyin)
         {
             ++result.skipped;
             continue;
@@ -1830,6 +1850,23 @@ PersonalDictionaryEditResult edit_personal_dictionary(const RuntimePaths &paths,
         if (!checked.entry)
             return {false, checked.error};
         new_entry = std::move(checked.entry);
+        // 只归一新写入的词：查询会把 xvan、lue 先改成 xuan、lve 再查库，照原样存的行永远查不到。
+        // 被替换的旧词保留原键，旧版本存下的 lue、jve 行才删得掉。
+        if (new_entry->kind == PersonalDictionaryKind::Pinyin)
+        {
+            std::string key;
+            std::size_t start = 0;
+            while (true)
+            {
+                const auto end = new_entry->key.find('\'', start);
+                key += quanpin::canonical_umlaut_spelling(new_entry->key.substr(start, end - start));
+                if (end == std::string::npos)
+                    break;
+                key += '\'';
+                start = end + 1;
+            }
+            new_entry->key = std::move(key);
+        }
     }
     try
     {

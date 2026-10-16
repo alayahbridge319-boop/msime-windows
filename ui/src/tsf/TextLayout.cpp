@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <dwrite_1.h>
+#include <vector>
 
 using std::max;
 using std::min;
@@ -73,8 +75,10 @@ BOOL CTextLayout::EnsureTextFormat(const LOGFONT *plf, FLOAT dpiY)
         _pTextFormat = NULL;
     }
 
-    const DWRITE_FONT_WEIGHT fontWeight =
-        plf->lfWeight >= FW_BOLD ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL;
+    // LOGFONT weights use the same 100..900 scale as DirectWrite; FW_DONTCARE means regular.
+    const DWRITE_FONT_WEIGHT fontWeight = plf->lfWeight > FW_DONTCARE
+                                              ? static_cast<DWRITE_FONT_WEIGHT>(std::clamp<LONG>(plf->lfWeight, 1, 999))
+                                              : DWRITE_FONT_WEIGHT_NORMAL;
     const DWRITE_FONT_STYLE fontStyle = plf->lfItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
     const DWRITE_FONT_STRETCH fontStretch = DWRITE_FONT_STRETCH_NORMAL;
     const FLOAT fontSize = DipsFromLogFontHeight(plf, dpiY);
@@ -128,6 +132,29 @@ BOOL CTextLayout::Layout(const WCHAR *psz, UINT nCnt, const LOGFONT *plf, FLOAT 
     }
 
     _pTextLayout->SetWordWrapping(_singleLine ? DWRITE_WORD_WRAPPING_NO_WRAP : DWRITE_WORD_WRAPPING_WRAP);
+    if (_letterSpacingDips != 0.0f)
+    {
+        IDWriteTextLayout1 *pTextLayout1 = NULL;
+        if (SUCCEEDED(
+                _pTextLayout->QueryInterface(__uuidof(IDWriteTextLayout1), reinterpret_cast<void **>(&pTextLayout1))))
+        {
+            pTextLayout1->SetCharacterSpacing(0.0f, _letterSpacingDips, 0.0f, {0, layoutLength});
+            pTextLayout1->Release();
+        }
+    }
+    if (_cssLineHeightDips > 0.0f && !_singleLine)
+    {
+        // CSS half-leading: the natural line box is centered in the line-height.
+        // GetLineMetrics fills nothing when the buffer is short, so fetch every line.
+        UINT32 count = 0;
+        _pTextLayout->GetLineMetrics(NULL, 0, &count);
+        std::vector<DWRITE_LINE_METRICS> natural(max(count, 1u));
+        if (count > 0 && SUCCEEDED(_pTextLayout->GetLineMetrics(natural.data(), count, &count)))
+        {
+            _pTextLayout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, _cssLineHeightDips,
+                                         natural[0].baseline + (_cssLineHeightDips - natural[0].height) * 0.5f);
+        }
+    }
 
     DWRITE_TEXT_METRICS textMetrics = {};
     if (FAILED(_pTextLayout->GetMetrics(&textMetrics)))
@@ -250,6 +277,20 @@ BOOL CTextLayout::Layout(const WCHAR *psz, UINT nCnt, const LOGFONT *plf, FLOAT 
         _lineHeightDips = max(textMetrics.height, 1.0f);
     }
 
+    _viewportHeightDips = layoutHeightDips;
+    _contentHeightDips = lineTopDips + _paddingBottomDips;
+    SetVerticalScroll(_verticalScrollDips);
+    return TRUE;
+}
+
+BOOL CTextLayout::SetVerticalScroll(FLOAT dips)
+{
+    const FLOAT clamped = min(max(dips, 0.0f), GetMaxVerticalScroll());
+    if (clamped == _verticalScrollDips)
+    {
+        return FALSE;
+    }
+    _verticalScrollDips = clamped;
     return TRUE;
 }
 
@@ -325,8 +366,8 @@ BOOL CTextLayout::Render(ID2D1RenderTarget *pRenderTarget, const WCHAR *psz, UIN
                 {
                     if (!_singleLine)
                     {
-                        selectionRect.top = FloorToPixelAlignedDips(line.top, _dpiY);
-                        selectionRect.bottom = CeilToPixelAlignedDips(line.bottom, _dpiY);
+                        selectionRect.top = FloorToPixelAlignedDips(line.top - _verticalScrollDips, _dpiY);
+                        selectionRect.bottom = CeilToPixelAlignedDips(line.bottom - _verticalScrollDips, _dpiY);
                     }
                     pRenderTarget->FillRectangle(D2D1::RectF(selectionRect.left - scrollX, selectionRect.top,
                                                              selectionRect.right - scrollX, selectionRect.bottom),
@@ -338,7 +379,7 @@ BOOL CTextLayout::Render(ID2D1RenderTarget *pRenderTarget, const WCHAR *psz, UIN
 
     if (_pTextLayout && nCnt > 0)
     {
-        const FLOAT textTop = (_singleLine && _nLineCnt > 0) ? _prgLines[0].top : _paddingTopDips;
+        const FLOAT textTop = (_singleLine && _nLineCnt > 0) ? _prgLines[0].top : _paddingTopDips - GetVerticalScroll();
         pRenderTarget->DrawTextLayout(
             D2D1::Point2F(_paddingLeftDips - (_singleLine ? _horizontalScrollDips : 0.0f), textTop), _pTextLayout,
             pTextBrush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
@@ -365,7 +406,9 @@ BOOL CTextLayout::Render(ID2D1RenderTarget *pRenderTarget, const WCHAR *psz, UIN
                 BOOL hasUnderlineRect = FALSE;
                 for (UINT k = nCompStartInLine; k < nCompEndInLine; k++)
                 {
-                    const D2D1_RECT_F &rc = line.prgCharInfo[k].rc;
+                    D2D1_RECT_F rc = line.prgCharInfo[k].rc;
+                    rc.top -= GetVerticalScroll();
+                    rc.bottom -= GetVerticalScroll();
 
                     if (composition.da.crBk.type != TF_CT_NONE)
                     {
@@ -506,6 +549,11 @@ BOOL CTextLayout::RectFromCharPosDips(UINT nPos, D2D1_RECT_F *prc)
         prc->left -= _horizontalScrollDips;
         prc->right -= _horizontalScrollDips;
     }
+    else
+    {
+        prc->top -= _verticalScrollDips;
+        prc->bottom -= _verticalScrollDips;
+    }
     return TRUE;
 }
 
@@ -560,7 +608,7 @@ BOOL CTextLayout::RectFromCharPosDipsRaw(UINT nPos, D2D1_RECT_F *prc)
 UINT CTextLayout::CharPosFromPoint(POINT pt)
 {
     const FLOAT dipX = PixelsToDipsX(static_cast<FLOAT>(pt.x)) + (_singleLine ? _horizontalScrollDips : 0.0f);
-    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y));
+    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y)) + GetVerticalScroll();
     for (UINT i = 0; i < _nLineCnt; i++)
     {
         for (UINT j = 0; j < _prgLines[i].nCnt; j++)
@@ -594,7 +642,7 @@ UINT CTextLayout::InsertionIndexFromPoint(POINT pt)
     }
 
     const FLOAT dipX = PixelsToDipsX(static_cast<FLOAT>(pt.x)) + (_singleLine ? _horizontalScrollDips : 0.0f);
-    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y));
+    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y)) + GetVerticalScroll();
 
     for (UINT i = 0; i < _nLineCnt; i++)
     {
@@ -655,7 +703,7 @@ UINT CTextLayout::InsertionIndexFromPoint(POINT pt)
 UINT CTextLayout::ExactCharPosFromPoint(POINT pt)
 {
     const FLOAT dipX = PixelsToDipsX(static_cast<FLOAT>(pt.x)) + (_singleLine ? _horizontalScrollDips : 0.0f);
-    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y));
+    const FLOAT dipY = PixelsToDipsY(static_cast<FLOAT>(pt.y)) + GetVerticalScroll();
     for (UINT i = 0; i < _nLineCnt; i++)
     {
         for (UINT j = 0; j < _prgLines[i].nCnt; j++)
@@ -687,11 +735,27 @@ UINT CTextLayout::FineFirstEndCharPosInLine(UINT uCurPos, BOOL bFirst)
     return static_cast<UINT>(-1);
 }
 
-void CTextLayout::EnsureCaretVisible(UINT nPos)
+void CTextLayout::EnsureCaretVisible(UINT nPos, BOOL vertical)
 {
     if (!_singleLine)
     {
         _horizontalScrollDips = 0.0f;
+        D2D1_RECT_F caret = {};
+        if (vertical && RectFromCharPosDipsRaw(nPos, &caret))
+        {
+            // Keep the caret's line inside the content box, as a <textarea> does.
+            const FLOAT visibleTop = _verticalScrollDips + _paddingTopDips;
+            const FLOAT visibleBottom = _verticalScrollDips + _viewportHeightDips - _paddingBottomDips;
+            if (caret.top < visibleTop)
+            {
+                _verticalScrollDips = caret.top - _paddingTopDips;
+            }
+            else if (caret.bottom > visibleBottom)
+            {
+                _verticalScrollDips = caret.bottom - _viewportHeightDips + _paddingBottomDips;
+            }
+        }
+        SetVerticalScroll(_verticalScrollDips);
         return;
     }
 

@@ -1,19 +1,23 @@
 import { serializeHostMessage } from '../../../../shared/messages';
-import { applyDropdownValue, applyToggleState, setFuzzyRuleOptionsDisabled, setSmartPunctuationOptionsDisabled, setupDropdownMenu, setupNeuralModelControls, setupToggleButton } from './shared';
+import { applyDropdownValue, applyToggleState, setCandidateTranslationOptionsDisabled, setFuzzyRuleOptionsDisabled, setSmartPunctuationOptionsDisabled, setupDropdownMenu, setupNeuralModelControls, setupToggleButton } from './shared';
 import { updateConfig } from './config-sync';
 import { updateCandidatePreviewHelpcode } from './appearance';
 import { setupCredentialTest } from './credential-test';
+import { getAiAssistantState, isUsableAiAssistantState, onAiAssistantStateChange } from './ai-assistant-state';
 import { onHostMessage } from '../utils/host-messages';
 import { hoistOverlay } from '../utils/overlay-host';
 
 type InputScheme = 'quanpin' | 'shuangpin' | 'wubi';
 type InputMode = 'chinese' | 'japanese';
 
-type TranslationProvider = 'tencent' | 'niutrans' | 'custom';
+type TranslationProvider = 'tencent' | 'niutrans' | 'custom' | 'ai';
 
 let applyingInputConfig = false;
-let customTranslationEnabled = false;
-let niutransTranslationEnabled = false;
+let translationProvider: TranslationProvider = 'tencent';
+
+function parseTranslationProvider(value: unknown): TranslationProvider {
+  return value === 'niutrans' || value === 'custom' || value === 'ai' ? value : 'tencent';
+}
 
 const SHUANGPIN_REFRESH_TIMEOUT_MS = 5000;
 let shuangpinToastTimer: number | null = null;
@@ -169,14 +173,8 @@ export function applyFrequencyConfig(config: any): void {
   applyDropdownValue('frequencyLinearStepBtn', 'frequencyLinearStepMenu', String(config?.linear_step ?? 1));
 }
 
-function syncCandidateTranslationOptions(enabled: boolean): void {
-  document.getElementById('candidateTranslationApiOptions')?.classList.toggle('is-disabled', !enabled);
-}
-
 function activeTranslationProvider(): TranslationProvider {
-  if (niutransTranslationEnabled) return 'niutrans';
-  if (customTranslationEnabled) return 'custom';
-  return 'tencent';
+  return translationProvider;
 }
 
 function inputValue(id: string): string {
@@ -185,6 +183,10 @@ function inputValue(id: string): string {
 
 function translationTestConfig(): Record<string, string> {
   const provider = activeTranslationProvider();
+  if (provider === 'ai') {
+    // 服务端直接读取 AI 辅助当前服务商配置，页面无需传地址与密钥。
+    return {};
+  }
   if (provider === 'niutrans') {
     return { appId: inputValue('niutransAppId'), apiKey: inputValue('niutransApiKey') };
   }
@@ -194,10 +196,20 @@ function translationTestConfig(): Record<string, string> {
   return { secretId: inputValue('tencentTmtSecretId'), secretKey: inputValue('tencentTmtSecretKey') };
 }
 
+// AI 服务不随请求带凭据，过时判断改看 AI 辅助页的当前配置。
+function translationTestSnapshot(): Record<string, string> {
+  return activeTranslationProvider() === 'ai' ? { ...getAiAssistantState() } : translationTestConfig();
+}
+
 function syncCandidateTranslationWarning(): void {
   const warning = document.getElementById('candidateTranslationApiWarning');
   if (!warning) return;
   const provider = activeTranslationProvider();
+  if (provider === 'ai') {
+    warning.textContent = '请先在 AI 辅助页面填写接口地址、Token 和模型';
+    warning.classList.toggle('is-hidden', isUsableAiAssistantState(getAiAssistantState()));
+    return;
+  }
   if (provider === 'custom') {
     const endpoint = (document.getElementById('customTranslationEndpoint') as HTMLInputElement | null)?.value.trim();
     const valid = /^https?:\/\/\S+$/i.test(endpoint ?? '');
@@ -222,10 +234,20 @@ function syncTranslationProviderView(provider: TranslationProvider): void {
   const tencentFields = document.getElementById('tencentTranslationFields');
   const niutransFields = document.getElementById('niutransTranslationFields');
   const customFields = document.getElementById('customTranslationFields');
+  const aiFields = document.getElementById('aiTranslationFields');
   if (tencentFields) tencentFields.hidden = provider !== 'tencent';
   if (niutransFields) niutransFields.hidden = provider !== 'niutrans';
   if (customFields) customFields.hidden = provider !== 'custom';
+  if (aiFields) aiFields.hidden = provider !== 'ai';
+  syncAiTranslationSummary();
   syncCandidateTranslationWarning();
+}
+
+function syncAiTranslationSummary(): void {
+  const summary = document.getElementById('aiTranslationSummary') as HTMLInputElement | null;
+  if (!summary) return;
+  const assistant = getAiAssistantState();
+  summary.value = isUsableAiAssistantState(assistant) ? `${assistant.provider} · ${assistant.model}` : '';
 }
 
 function refreshTranslationProvider(): void {
@@ -248,20 +270,21 @@ export function applyTencentTmtConfig(config: Record<string, unknown> | undefine
 }
 
 export function applyCustomTranslationConfig(config: Record<string, unknown> | undefined): void {
-  customTranslationEnabled = config?.enabled === true;
   const endpoint = document.getElementById('customTranslationEndpoint') as HTMLInputElement | null;
   const apiKey = document.getElementById('customTranslationApiKey') as HTMLInputElement | null;
   if (endpoint && typeof config?.endpoint === 'string') endpoint.value = config.endpoint;
   if (apiKey && typeof config?.api_key === 'string') apiKey.value = config.api_key;
-  refreshTranslationProvider();
 }
 
 export function applyNiuTransConfig(config: Record<string, unknown> | undefined): void {
-  niutransTranslationEnabled = config?.enabled === true;
   const appId = document.getElementById('niutransAppId') as HTMLInputElement | null;
   const apiKey = document.getElementById('niutransApiKey') as HTMLInputElement | null;
   if (appId && typeof config?.app_id === 'string') appId.value = config.app_id;
   if (apiKey && typeof config?.apikey === 'string') apiKey.value = config.apikey;
+}
+
+export function applyTranslationConfig(config: Record<string, unknown> | undefined): void {
+  translationProvider = parseTranslationProvider(config?.provider);
   refreshTranslationProvider();
 }
 
@@ -386,8 +409,11 @@ export function setupInput(): void {
     updateConfig('input.enter_learns_english_word', active);
   });
   setupToggleButton('candidateTranslationsToggleBtn', (active) => {
-    syncCandidateTranslationOptions(active);
+    setCandidateTranslationOptionsDisabled(!active);
     updateConfig('general.candidate_translations', active);
+  });
+  setupToggleButton('candidateTranslationShowPosToggleBtn', (active) => {
+    updateConfig('general.candidate_translation_show_pos', active);
   });
   setupDropdownMenu(
     'translationTargetLanguageBtn',
@@ -400,17 +426,14 @@ export function setupInput(): void {
   document.getElementById('translationProviderMenu')?.addEventListener('click', (event: Event) => {
     const item = (event.target as HTMLElement | null)?.closest<HTMLElement>('.dropdown-item');
     if (!item) return;
-    const provider: TranslationProvider = item.dataset.value === 'niutrans'
-      ? 'niutrans'
-      : item.dataset.value === 'custom'
-        ? 'custom'
-        : 'tencent';
-    niutransTranslationEnabled = provider === 'niutrans';
-    customTranslationEnabled = provider === 'custom';
+    const provider = parseTranslationProvider(item.dataset.value);
+    translationProvider = provider;
     syncTranslationProviderView(provider);
-    // Only one provider is active; keep the mutually-exclusive flags in sync.
-    updateConfig('niutrans.enabled', niutransTranslationEnabled);
-    updateConfig('custom_translation.enabled', customTranslationEnabled);
+    updateConfig('translation.provider', provider);
+  });
+  onAiAssistantStateChange(() => {
+    syncAiTranslationSummary();
+    syncCandidateTranslationWarning();
   });
   const translationFields: Record<string, string> = {
     tencentTmtSecretId: 'tencent_tmt.secret_id',
@@ -435,7 +458,8 @@ export function setupInput(): void {
     'candidateTranslationTestButton',
     'candidateTranslationTestStatus',
     () => `translation.${activeTranslationProvider()}`,
-    translationTestConfig
+    translationTestConfig,
+    translationTestSnapshot
   );
   setupToggleButton('cloudCandidatesToggleBtn', (active) => {
     updateConfig('general.cloud_candidates', active);

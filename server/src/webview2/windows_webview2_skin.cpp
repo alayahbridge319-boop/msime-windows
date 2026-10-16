@@ -38,6 +38,45 @@ double GetActiveCandidateSkinDecorationWidthDip()
     return activeExternalCandidateSkin ? activeExternalCandidateSkin->decorationWidthDip : 0.0;
 }
 
+namespace
+{
+double ActiveOuterInset(bool top, bool right, bool bottom)
+{
+    if (!activeExternalCandidateSkin || !activeExternalCandidateSkin->outerInsetsDip)
+    {
+        return 0.0;
+    }
+    const CandidateSkinCatalog::InsetsDip &insets = *activeExternalCandidateSkin->outerInsetsDip;
+    if (top)
+        return insets.top;
+    if (right)
+        return insets.right;
+    if (bottom)
+        return insets.bottom;
+    return insets.left;
+}
+} // namespace
+
+double GetActiveCandidateSkinOuterTopDip()
+{
+    return ActiveOuterInset(true, false, false);
+}
+
+double GetActiveCandidateSkinOuterRightDip()
+{
+    return ActiveOuterInset(false, true, false);
+}
+
+double GetActiveCandidateSkinOuterBottomDip()
+{
+    return ActiveOuterInset(false, false, true);
+}
+
+double GetActiveCandidateSkinOuterLeftDip()
+{
+    return ActiveOuterInset(false, false, false);
+}
+
 std::wstring ReadHtmlFile(const std::wstring &filePath)
 {
     std::ifstream file(filePath, std::ios::binary);
@@ -367,6 +406,13 @@ std::wstring BuildExternalCandidateSkinCss(const CandidateSkinCatalog::Package &
         css.append(L" center / contain no-repeat; pointer-events: none; }\n"
                    L".container { position: relative; z-index: 1; }\n");
     }
+    if (skin.outerInsetsDip && (skin.outerInsetsDip->left > 0.0 || skin.outerInsetsDip->top > 0.0))
+    {
+        // MarginLeft / MarginTop 指向外留白信封的左上角，这里把卡片连同挂件相对定位回卡片原位。
+        // 用相对定位而不是 padding：.containerParent 是挂件的定位容器，加 padding 会把挂件锚点挪到信封上。
+        css.append(fmt::format(L".containerParent {{ position: relative; left: {}px; top: {}px; }}\n",
+                               skin.outerInsetsDip->left, skin.outerInsetsDip->top));
+    }
     AppendExternalCandidateCornerCss(css, skin);
     const bool light = ResolveConfiguredTheme(GetConfiguredThemeCand()) == "light";
     const CandidateSkinCatalog::CandidateColors &colors = light ? skin.light : skin.dark;
@@ -394,7 +440,149 @@ std::wstring BuildExternalCandidateSkinCss(const CandidateSkinCatalog::Package &
                                L"background-clip: border-box; }}\n",
                                size));
     }
+    if (skin.borderImage)
+    {
+        // v2 专有九宫格贴图边框。stretch_dip 给出时它才是可拉伸区，语义比 slice_dip 直白：
+        // 面板图里画死的装饰放在它之外就保持 1:1，不会被横向拉长。
+        const auto &bi = *skin.borderImage;
+        const std::vector<double> &sliceSrc = bi.stretchDip.empty() ? bi.sliceDip : bi.stretchDip;
+        std::wstring sliceStr;
+        for (size_t i = 0; i < sliceSrc.size(); ++i)
+        {
+            if (i > 0)
+                sliceStr += L" ";
+            sliceStr += fmt::format(L"{}", sliceSrc[i]);
+        }
+        if (bi.fill)
+            sliceStr += L" fill";
+
+        const std::vector<double> &widthSrc = bi.widthDip.empty() ? sliceSrc : bi.widthDip;
+        std::wstring widthStr;
+        for (size_t i = 0; i < widthSrc.size(); ++i)
+        {
+            if (i > 0)
+                widthStr += L" ";
+            widthStr += fmt::format(L"{}px", widthSrc[i]);
+        }
+
+        css.append(L".container:not(:empty) { border-style: solid; border-image-source: ");
+        css.append(ManifestImageCssUrl(skinsRoot, skin.id, bi.source));
+        // border-width 决定内容盒的内缩量，必须与 border-image-width 一致；只写 border-image-width
+        // 时内容盒仍按基础皮肤的 border 宽度内缩，文字会压在贴图上。
+        css.append(fmt::format(L"; border-width: {}; border-image-slice: {}; border-image-width: {}; "
+                               L"border-image-repeat: stretch; "
+                               L"background-color: transparent; border-color: transparent; border-radius: 0; }}\n",
+                               widthStr, sliceStr, widthStr));
+    }
+    if (skin.contentInsetsDip)
+    {
+        // 四值展开成「上右下左」，1 值全边、2 值纵横、4 值四边，与 CSS 一致。
+        const auto expand4 = [](const std::vector<double> &v, double out[4]) {
+            if (v.size() == 1)
+                out[0] = out[1] = out[2] = out[3] = v[0];
+            else if (v.size() == 2)
+            {
+                out[0] = out[2] = v[0];
+                out[1] = out[3] = v[1];
+            }
+            else
+            {
+                for (size_t i = 0; i < 4; ++i)
+                    out[i] = i < v.size() ? v[i] : 0.0;
+            }
+        };
+        double borderPx[4] = {0.0, 0.0, 0.0, 0.0};
+        if (skin.borderImage)
+        {
+            const auto &bi = *skin.borderImage;
+            const std::vector<double> &widthSrc =
+                bi.widthDip.empty() ? (bi.stretchDip.empty() ? bi.sliceDip : bi.stretchDip) : bi.widthDip;
+            expand4(widthSrc, borderPx);
+        }
+        // content_insets_dip 从面板外缘量起，而 CSS 的 padding 从边框内缘起算，这里把边框宽度扣掉。
+        const auto &insets = *skin.contentInsetsDip;
+        const double raw[4] = {insets.top, insets.right, insets.bottom, insets.left};
+        double padding[4] = {0.0, 0.0, 0.0, 0.0};
+        for (size_t i = 0; i < 4; ++i)
+            padding[i] = (std::max)(0.0, raw[i] - borderPx[i]);
+        css.append(fmt::format(L".container:not(:empty) {{ padding: {}px {}px {}px {}px !important; }}\n", padding[0],
+                               padding[1], padding[2], padding[3]));
+    }
+    if (skin.lineGapDip)
+    {
+        // 预编辑行与候选行之间的行距。基础皮肤把它并进 .row 的上下边距，这里显式覆盖。
+        css.append(fmt::format(L".row.pinyin {{ margin-bottom: {}px; }}\n", *skin.lineGapDip));
+    }
+    // 自由挂件：数量不限。候选框页面里没有能承载任意数量挂件的元素，所以按皮肤声明逐个生成
+    // 一份 CSS 规则，由 InjectExternalCandidateSkin 注入对应数量的空 div，挂件层数不再受
+    // ::before / ::after 两层限制。
+    if (!skin.freeDecorations.empty())
+    {
+        css.append(L".containerParent { position: relative; }\n");
+        css.append(L".msime-skin-decor { position: absolute; pointer-events: none; "
+                   L"background-position: center; background-repeat: no-repeat; background-size: contain; }\n");
+    }
+    for (size_t idx = 0; idx < skin.freeDecorations.size(); ++idx)
+    {
+        const auto &dec = skin.freeDecorations[idx];
+        // offset 语义统一：正数向右、向下，与 D2D 侧 CandidateSkinOverlay 一致。
+        const double ox = dec.offsetXDip;
+        const double oy = dec.offsetYDip;
+        std::wstring posRule;
+        if (dec.anchor == "top-left")
+            posRule = fmt::format(L"left: {}px; top: {}px;", ox, oy);
+        else if (dec.anchor == "top-right")
+            posRule = fmt::format(L"right: {}px; top: {}px;", -ox, oy);
+        else if (dec.anchor == "bottom-left")
+            posRule = fmt::format(L"left: {}px; bottom: {}px;", ox, -oy);
+        else if (dec.anchor == "bottom-right")
+            posRule = fmt::format(L"right: {}px; bottom: {}px;", -ox, -oy);
+        else if (dec.anchor == "left")
+            posRule = fmt::format(L"left: {}px; top: 50%; transform: translateY(calc(-50% + {}px));", ox, oy);
+        else if (dec.anchor == "right")
+            posRule = fmt::format(L"right: {}px; top: 50%; transform: translateY(calc(-50% + {}px));", -ox, oy);
+        else if (dec.anchor == "top")
+            posRule = fmt::format(L"top: {}px; left: 50%; transform: translateX(calc(-50% + {}px));", oy, ox);
+        else if (dec.anchor == "bottom")
+            posRule = fmt::format(L"bottom: {}px; left: 50%; transform: translateX(calc(-50% + {}px));", -oy, ox);
+        else
+            posRule = fmt::format(L"left: 50%; top: 50%; "
+                                  L"transform: translate(calc(-50% + {}px), calc(-50% + {}px));",
+                                  ox, oy);
+
+        css.append(fmt::format(L".msime-skin-decor[data-i=\"{}\"] {{ z-index: {}; {} width: {}px; height: {}px; "
+                               L"background-image: ",
+                               idx, dec.zIndex, posRule, dec.widthDip, dec.heightDip));
+        css.append(ManifestImageCssUrl(skinsRoot, skin.id, dec.image));
+        css.append(L"; }\n");
+    }
     return css;
+}
+
+// 挂件层数的 CSS 已经按 data-i 生成，这里把对应数量的空 div 补进 .containerParent。
+// 页面自己的脚本只换 .container 的内容，不动 .containerParent，所以这些 div 不会被打掉。
+std::wstring BuildFreeDecorationLayerScript(const CandidateSkinCatalog::Package &skin)
+{
+    if (skin.freeDecorations.empty())
+    {
+        return L"";
+    }
+    std::wstring indices;
+    for (size_t i = 0; i < skin.freeDecorations.size(); ++i)
+    {
+        if (i > 0)
+            indices += L",";
+        indices += std::to_wstring(i);
+    }
+    return L"<script id=\"external-candidate-skin-decor\">(function(){"
+           L"function add(){var parent=document.getElementById('realContainerParent');if(!parent){return;}"
+           L"[" +
+           indices +
+           L"].forEach(function(i){if(parent.querySelector('.msime-skin-decor[data-i=\"'+i+'\"]')){return;}"
+           L"var node=document.createElement('div');node.className='msime-skin-decor';"
+           L"node.setAttribute('data-i',String(i));parent.appendChild(node);});}"
+           L"if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',add);}else{add();}"
+           L"})();</script>";
 }
 
 bool InjectExternalCandidateSkin(std::wstring &html, const CandidateSkinCatalog::Package &skin,
@@ -420,7 +608,7 @@ bool InjectExternalCandidateSkin(std::wstring &html, const CandidateSkinCatalog:
     {
         return false;
     }
-    html.insert(headEnd, vars + generated);
+    html.insert(headEnd, vars + generated + BuildFreeDecorationLayerScript(skin));
     return true;
 }
 
@@ -518,10 +706,9 @@ int PrepareHtmlForWnds()
     if (!CandidateSkinCatalog::IsBuiltIn(candidateSkin))
     {
         const std::wstring skinsRoot = assetPath + L"\\skins";
-        activeExternalCandidateSkin = CandidateSkinCatalog::Load(skinsRoot, candidateSkin);
-        if (activeExternalCandidateSkin &&
-            !CandidateSkinCatalog::Supports(*activeExternalCandidateSkin, candidateLayout, candidateTheme))
-            activeExternalCandidateSkin.reset();
+        // LoadSupported 只在皮肤声明支持当前布局与主题时才返回，两个后端走同一条规则。
+        activeExternalCandidateSkin =
+            CandidateSkinCatalog::LoadSupported(skinsRoot, candidateSkin, candidateLayout, candidateTheme);
         baseCandidateSkin = activeExternalCandidateSkin ? activeExternalCandidateSkin->base : "fluent";
     }
     std::wstring htmlCandWnd;
@@ -658,7 +845,21 @@ int PrepareHtmlForWnds()
 
 bool ApplyConfiguredCandidateWindowLayout()
 {
+    // 外部皮肤可能只声明了部分布局，换布局后皮肤是否生效会变，工具栏跟着候选窗皮肤走，要一起刷新。
+    if (FloatingToolbarPresenter::Instance().IsBound())
+    {
+        FloatingToolbarPresenter::Instance().ApplyTheme();
+    }
+    const std::wstring previousFtbHtml = HTMLStringFtbWnd;
     PrepareHtmlForWnds();
+    if (webviewFtbWnd && !HTMLStringFtbWnd.empty() && HTMLStringFtbWnd != previousFtbHtml)
+    {
+        ClearFloatingToolbarNavigationState();
+        if (SUCCEEDED(webviewFtbWnd->NavigateToString(HTMLStringFtbWnd.c_str())))
+        {
+            loadedFloatingToolbarSkin = preparedCandidateSkin;
+        }
+    }
     if (CandidatePresenter::Instance().IsBound() && !webviewCandWnd)
     {
         return true;

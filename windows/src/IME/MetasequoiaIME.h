@@ -53,6 +53,8 @@ const DWORD WM_ApplyPunctuationLock = WM_USER + 27;
 const DWORD WM_CommitCandidateAndContinue = WM_USER + 28;
 const DWORD WM_AsyncCycleInputMode = WM_USER + 29;
 const DWORD WM_SyncCapsLockPunctuation = WM_USER + 30;
+const DWORD WM_ApplyUiLessCandidates = WM_USER + 31;
+const DWORD WM_ApplyCapsLockEdge = WM_USER + 32;
 constexpr ULONG_PTR SMART_PUNCTUATION_SENDINPUT_EXTRA_INFO = 0x4D535050u;
 constexpr ULONG_PTR PAIRED_PUNCTUATION_SENDINPUT_EXTRA_INFO = 0x4D535051u;
 // Synthetic input that this tip generates carries a marker meaning "this tip
@@ -139,6 +141,16 @@ constexpr UINT_PTR TIMER_DEFERRED_FOCUS_LOSS = 4;
 constexpr UINT_PTR TIMER_FOCUS_STATUS_RESEND = 5;
 constexpr UINT_PTR TIMER_PAIRED_PUNCTUATION_CARET = 6;
 constexpr UINT_PTR TIMER_FOCUS_CARET_STATE = 7;
+// Re-arms a committing key's reply poll between slices. The wake-up must be a
+// timer, not a message posted to self: GetMessage only generates WM_PAINT and
+// WM_TIMER while the thread queue is empty, so a self-posted re-dispatch keeps
+// the queue non-empty for the whole window and defers every paint the host is
+// waiting on (measured: zero WM_PAINT and zero WM_TIMER during a one-second
+// re-post loop, all of them delivered the moment it drained). WM_TIMER ranks
+// below WM_PAINT, so with a timer the host repaints between slices.
+// The id must not collide with the constants above.
+constexpr UINT_PTR TIMER_COMMIT_REPLY_POLL = 8;
+constexpr UINT COMMIT_REPLY_POLL_INTERVAL_MS = 1;
 // Runs after the focus status resend and the reconnect it may trigger, so the
 // Server has activated this client before the badge request arrives.
 constexpr UINT FOCUS_CARET_STATE_DELAY_MS = 120;
@@ -473,11 +485,41 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
         uint64_t compositionEpoch = 0;
         uint64_t deferredReplayToken = 0;
         std::wstring prefetchedText;
+        // End of the cooperative commit-reply window (GetTickCount64 domain),
+        // 0 until the first slice starts it. Kept on the request so a re-posted
+        // slice resumes the same window instead of restarting it.
+        ULONGLONG commitReplyDeadlineTick = 0;
     };
     bool _PostAsyncKeyRequest(UINT message, UINT code, WCHAR wch, uint64_t requestId, std::wstring prefetchedText = {},
                               uint64_t expectedFocusToken = 0, uint64_t expectedCompositionEpoch = 0,
                               uint64_t deferredReplayToken = 0);
     bool _TakeAsyncKeyRequest(UINT message, UINT token, _Out_ AsyncKeyRequest &request);
+    // One slice of a committing key's reply wait. The wait runs on the host UI
+    // thread, so instead of blocking for the whole window this polls without
+    // blocking, re-queues the request on "not ready", and returns false so the
+    // handler yields the message pump. A request that is behind an older
+    // waiting commit yields without reading, so commits settle in send order.
+    // Returns true with *receivedData set to the reply or to a
+    // TransportUnavailable frame.
+    bool _PollCommitReply(UINT message, UINT token, _Inout_ AsyncKeyRequest &request,
+                          _Outptr_result_maybenull_ FanyImeNamedpipeDataToTsf **receivedData);
+    bool _RequeueAsyncKeyRequest(UINT token, UINT message, AsyncKeyRequest request);
+    // Runs on TIMER_COMMIT_REPLY_POLL: re-dispatches, oldest request first, the
+    // requests that yielded waiting for their committing reply, and stops the
+    // timer once none is left.
+    void _DispatchPendingCommitReplyPolls();
+    // Fetches the reply a commit key's edit session would otherwise wait for and
+    // caches it by request id, so the session consumes it at once. Returns false
+    // when the caller must not invoke the session: it yielded, or the reply was
+    // a transport failure that has already been settled here.
+    bool _FetchCommitReplyForEditSession(UINT message, UINT token, AsyncKeyRequest &request);
+    // A delivered commit key whose reply is lost: the Server may already have
+    // committed, so it is dropped and never resent, with a transport reset.
+    void _FailUnansweredCommitKey(uint64_t requestId, uint64_t deferredReplayToken);
+    // The request's focus token or composition epoch was replaced. A commit
+    // key that already yielded waiting for its reply was delivered, so on the
+    // same focus it fails as unanswered instead of being dropped as stale.
+    void _FailSupersededAsyncKeyRequest(const AsyncKeyRequest &request);
     struct WorkerCandidateCommit
     {
         std::wstring text;
@@ -670,6 +712,7 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     bool _IsCompositionActiveForKeyGuard();
     bool _ApplyBackspaceHoldGuard(WPARAM wParam, LPARAM lParam);
     void _ApplyCapsLockKeyDownSideEffects(bool capsLockEnabled);
+    void _QueueCapsLockEdge(bool actualKeyDown);
 
     BOOL _IsRangeCovered(TfEditCookie ec, _In_ ITfRange *pRangeTest, _In_ ITfRange *pRangeCover);
     VOID _DeleteCandidateList(BOOL fForce, _In_opt_ ITfContext *pContext);
@@ -873,7 +916,6 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     std::wstring _deferredProjectedRawInput;
     size_t _deferredProjectedCaret;
     bool _deferredProjectedCandidateActive;
-    bool _deferredProjectedUnicodeMode;
     uint64_t _deferredKeyFocusGeneration;
     bool _deferredKeyDrainPosted;
     bool _serverUnavailableFallbackActive;

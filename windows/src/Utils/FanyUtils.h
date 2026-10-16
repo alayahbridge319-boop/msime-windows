@@ -1,6 +1,7 @@
 #pragma once
 #include <Windows.h>
 #include <string>
+#include "../../../engine/contracts/input_state_shortcuts.h"
 
 namespace FanyUtils
 {
@@ -28,9 +29,24 @@ struct SwitchLanguageHotkeys
     bool ctrl = false;
     bool ctrl_alt_space = true;
     bool character_set_ctrl_shift_f = true;
+    FanyImeInputStateShortcuts::Snapshot input_state;
 };
 // Read keybindings.switch_language_* from shared config.toml.
 SwitchLanguageHotkeys ReadConfiguredSwitchLanguageHotkeys();
 // Whether input.vim_mode_apps in shared config.toml lists this host process; cached, disabled by default.
 bool ReadConfiguredVimMode();
+
+// Which taskbar language-bar buttons to show. Read from [language_bar] in the
+// shared config.toml; a missing key or file defaults to visible, so an absent
+// config keeps every button on. `enabled` is the master switch: when false, no
+// language-bar button is registered regardless of the per-button flags.
+struct LanguageBarVisibility
+{
+    bool enabled = true;
+    bool ime_mode = true;
+    bool double_single_byte = true;
+    bool punctuation = true;
+};
+// Read language_bar.enabled / show_ime_mode / show_double_single_byte / show_punctuation.
+LanguageBarVisibility ReadConfiguredLanguageBarVisibility();
 } // namespace FanyUtils

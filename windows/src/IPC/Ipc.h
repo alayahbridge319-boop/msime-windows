@@ -50,6 +50,7 @@ bool SupportsCharacterSetShortcut();
 bool SupportsCompositionRestore();
 bool SupportsCaretStateIndicator();
 bool SupportsTrilingualCycle();
+bool SupportsInputStateShortcuts();
 bool FlushNamedpipeFocusSessionReset();
 bool FlushNamedpipeImeDeactivation(uint64_t focusToken = 0);
 
@@ -65,12 +66,15 @@ int WriteDataToSharedMemory(           //
     const std::wstring &pinyin_string, //
     UINT write_flag                    //
 );
-KeyEventSendResult SendKeyEventToUIProcess(_Out_opt_ uint64_t *requestId = nullptr);
+KeyEventSendResult SendKeyEventToUIProcess(_Out_opt_ uint64_t *requestId = nullptr, unsigned inputStateAction = 0);
 void DebugTsfKeyLatency(_In_z_ const wchar_t *stage, uint64_t requestId, double elapsedMs, HRESULT result);
 void DebugTsfIssue47(_In_z_ const wchar_t *stage, uint64_t requestId, UINT code, WCHAR wch, UINT category,
                      UINT function, int eaten, BOOL composing, size_t virtualKeyLength, HRESULT result,
                      uint64_t correlationToken = 0);
 void QueueTsfDiagnosticLog(const std::wstring &line);
+// Game-host troubleshooting: `event` plus the host process and the calling GUI thread's
+// foreground/focus/caret windows. Window state only, never text. No-op while TSF diagnostics are off.
+void QueueTsfHostWindowDiagnostic(_In_z_ const wchar_t *event, const std::wstring &detail);
 int SendHideCandidateWndEventToUIProcess();
 int SendShowCandidateWndEventToUIProcess();
 int SendMoveCandidateWndEventToUIProcess();
@@ -102,7 +106,8 @@ int WriteDataToNamedPipe(              //
     const std::wstring &pinyin_string, //
     UINT write_flag                    //
 );
-KeyEventSendResult SendKeyEventToUIProcessViaNamedPipe(_Out_opt_ uint64_t *requestId = nullptr);
+KeyEventSendResult SendKeyEventToUIProcessViaNamedPipe(_Out_opt_ uint64_t *requestId = nullptr,
+                                                       unsigned inputStateAction = 0);
 int SendHideCandidateWndEventToUIProcessViaNamedPipe();
 int SendHideCaretStateEventToUIProcessViaNamedPipe();
 int SendShowCandidateWndEventToUIProcessViaNamedPipe();
@@ -116,15 +121,51 @@ bool TryReadCandidatePageFromSharedMemory(_Out_ std::wstring *candidatePage);
 // returns a non-TransportUnavailable empty frame for the caller to fall back.
 struct FanyImeNamedpipeDataToTsf *TryReadDataFromServerPipeWithTimeout(uint64_t expectedRequestId,
                                                                        bool abortTransportOnTimeout);
-// Replies that commit text (candidate selection, candidate + punctuation) get
-// a longer budget than ordinary keys. The request has already been written, so
-// a miss is DeliveryAmbiguous: the Server may have committed the selection.
-// Waiting for the same request_id is the only way to learn which candidate it
-// chose; a slow machine (battery, throttled disk) routinely needs more than
-// the ordinary 50ms. A miss past this budget drops the key and resets the
-// transport; the selection is never sent a second time.
-constexpr DWORD FANY_IME_COMMIT_REPLY_TIMEOUT_MS = 300;
+// Replies that commit text (candidate selection, candidate + punctuation) are
+// authoritative: the request has already been written, so a miss is
+// DeliveryAmbiguous and the Server may have committed the selection. Waiting
+// for the same request_id is the only way to learn which candidate it chose; a
+// slow key-handling thread (measured at 984ms) routinely needs far more than
+// the ordinary 50ms. That wait runs on the host UI thread, so this is the *total*
+// window a committing key may spend waiting, not a single blocking read:
+// callers poll it with nonblocking TryReadCommitReplySlice calls and yield the
+// message pump between them. Only a real transfer failure, or the end of this
+// window, tears the transport down; the selection is never sent a second time.
+constexpr DWORD FANY_IME_COMMIT_REPLY_TIMEOUT_MS = 1500;
+// An edit session that applies a commit key does not wait that window: the
+// message handler already fetched the reply and cached it by request id (see
+// CacheCommitReplyForEditSession), so the session consumes it at once. Every
+// asynchronous commit path (finalize, number select, candidate + punctuation)
+// fetches in its handler. This shorter bound is the pre-existing single-shot
+// wait, kept for the synchronous fallback and for the race where a transport
+// reset clears the cache in between. It must stay small enough that a miss
+// cannot visibly freeze the host.
+constexpr DWORD FANY_IME_COMMIT_REPLY_SESSION_WAIT_MS = 300;
 struct FanyImeNamedpipeDataToTsf *TryReadCommitReplyFromServerPipe(uint64_t expectedRequestId);
+// How one slice of a committing key's reply wait ended.
+enum class CommitReplyWaitStatus
+{
+    // *reply holds the authoritative reply (or a cached one).
+    Ready,
+    // No reply yet and the total window is not over. The pipe is left up, the
+    // reply is not consumed and nothing is torn down: the caller must yield
+    // (re-post its message) and poll again.
+    NotReady,
+    // A real transfer failure, or the total window expired. *reply holds a
+    // TransportUnavailable frame; the caller takes the existing reset path.
+    Transport,
+};
+// Polls the commit reply for expectedRequestId once without blocking: it only
+// consumes frames already in the pipe, and reports the window over once
+// deadlineTick (GetTickCount64 domain) has passed. *reply is set for Ready and
+// Transport.
+CommitReplyWaitStatus TryReadCommitReplySlice(uint64_t expectedRequestId, ULONGLONG deadlineTick,
+                                              _Out_ struct FanyImeNamedpipeDataToTsf **reply);
+// Puts a reply a message handler already fetched back into the pending-reply
+// cache, keyed by the request the edit session will look up. The session that
+// applies the key then consumes it without waiting again. Transport failures
+// are not cached: the handler settles those itself.
+void CacheCommitReplyForEditSession(uint64_t expectedRequestId, const struct FanyImeNamedpipeDataToTsf &reply);
 // True when requestId names a request that was actually written to the Server,
 // i.e. a lost reply is DeliveryAmbiguous rather than DefinitelyNotSent.
 inline bool IsDeliveredServerRequestId(uint64_t requestId)
@@ -158,6 +199,9 @@ inline thread_local std::wstring PinyinString = L"";
 // TF_TMF_UIELEMENTENABLEDONLY at ActivateEx, and/or BeginUIElement pbShow=FALSE.
 inline thread_local bool HostUiLessMode = false;
 inline thread_local bool CandidateUiLessMode = false;
+// The host claims to draw candidates but will not (Valve games without the compatibility name), so the
+// UI-less declaration is ignored and the Server's candidate window shows. Decided at ActivateEx.
+inline thread_local bool IgnoreHostUiLess = false;
 inline bool IsUiLessMode()
 {
     return HostUiLessMode || CandidateUiLessMode;

@@ -257,40 +257,6 @@ BOOL CCompositionProcessorEngine::IsVirtualKeyNeed( //
         return TRUE;
     }
 
-    // U-mode: bare digits compose hex; Shift+1..9 selects candidates.
-    if (IsUnicodeModeComposition() && uCode >= L'0' && uCode <= L'9')
-    {
-        const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-        const bool ctrl_down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool alt_down = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-        const bool shift_only = shift_down && !ctrl_down && !alt_down;
-        if (shift_only && uCode >= L'1' && uCode <= L'9')
-        {
-            if (pKeyState)
-            {
-                pKeyState->Category = CATEGORY_CANDIDATE;
-                pKeyState->Function = FUNCTION_SELECT_BY_NUMBER;
-            }
-            return TRUE;
-        }
-        if (pKeyState)
-        {
-            pKeyState->Category = CATEGORY_COMPOSING;
-            pKeyState->Function = FUNCTION_INPUT;
-        }
-        return TRUE;
-    }
-    if (IsUnicodeModeComposition() && _keystrokeBuffer.GetLength() == 1 && uCode == VK_OEM_PLUS && pwch &&
-        *pwch == L'+')
-    {
-        if (pKeyState)
-        {
-            pKeyState->Category = CATEGORY_COMPOSING;
-            pKeyState->Function = FUNCTION_INPUT;
-        }
-        return TRUE;
-    }
-
     // T-mode: digits, '/' and ':' that still extend a date/time are input. The rest keep their usual
     // meaning below (digits select, '/' and ':' are punctuation); Shift+digit never matches here.
     // V-mode: digits and . + - * / ( ) after the V prefix are input, so they neither select, page nor commit
@@ -306,7 +272,7 @@ BOOL CCompositionProcessorEngine::IsVirtualKeyNeed( //
         }
         return TRUE;
     }
-    // V-mode: bare digits are input, so Shift+1..9 selects like in U-mode. It must be decided here,
+    // V-mode: bare digits are input, so Shift+1..9 selects. It must be decided here,
     // before the punctuation rule below would commit the highlighted candidate together with '!' '@' ...
     // Shift+8/9 produce '*' '(' and were already taken as input above.
     if (IsVModeShiftDigitSelectionKey(uCode, _keystrokeBuffer.Get(), _keystrokeBuffer.GetLength()))
@@ -341,16 +307,6 @@ BOOL CCompositionProcessorEngine::IsVirtualKeyNeed( //
         (isMinusEqualPagingKey || isCommaPeriodPagingKey || isBracketPagingKey || uCode == VK_TAB ||
          uCode == VK_PRIOR || uCode == VK_NEXT || uCode == VK_UP || uCode == VK_DOWN))
     {
-        if (IsUnicodeModeComposition() && _keystrokeBuffer.GetLength() == 1 && uCode == VK_OEM_PLUS && pwch &&
-            *pwch == L'+')
-        {
-            if (pKeyState)
-            {
-                pKeyState->Category = CATEGORY_COMPOSING;
-                pKeyState->Function = FUNCTION_INPUT;
-            }
-            return TRUE;
-        }
         if (pKeyState)
         {
             pKeyState->Category = CATEGORY_CANDIDATE;
@@ -923,7 +879,7 @@ bool CCompositionProcessorEngine::IsDateTimeInputKey(UINT uCode, WCHAR wch, cons
 }
 
 // 只看字符不看键位：主键盘和小键盘的数字、运算符一样收，Server 也只看字符。前缀认哪个由 Server 的
-// VModeChanged 决定（双拼只认 V，全拼 V、v 都认）。
+// VModeChanged 决定（双拼和五笔只认 V，全拼 V、v 都认）。
 bool CCompositionProcessorEngine::IsVModeShiftDigitSelectionKey(UINT uCode, const WCHAR *buffer, DWORD_PTR length)
 {
     const bool shift_only = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 &&
@@ -1056,12 +1012,6 @@ BOOL CCompositionProcessorEngine::IsKeystrokeRange(UINT uCode, _Out_ _KEYSTROKE_
 
     pKeyState->Category = CATEGORY_NONE;
     pKeyState->Function = FUNCTION_NONE;
-
-    // U-mode owns 0-9 as hex composition input.
-    if (IsUnicodeModeComposition() && uCode >= L'0' && uCode <= L'9')
-    {
-        return FALSE;
-    }
 
     if (_candidateListIndexRange.IsRange(uCode))
     {

@@ -1,5 +1,6 @@
 #include "msimeui/Layout.h"
 
+#include "msimeui/Animation.h"
 #include "msimeui/DeviceResources.h"
 #include "msimeui/Fonts.h"
 #include "msimeui/Theme.h"
@@ -189,6 +190,17 @@ float ComputeAlignedStart(float origin, float available, float content, Vertical
     return origin;
 }
 
+// Children may paint a little outside their bounds (shadows, focus rings, indicators),
+// so culling keeps anything within this distance of the visible area.
+constexpr float kCullingOverdraw = 24.0f;
+
+bool ShouldRenderChild(const DeviceResources &deviceResources, const Visual &child)
+{
+    const RectF &bounds = child.GetBounds();
+    return deviceResources.IsVisible({bounds.x - kCullingOverdraw, bounds.y - kCullingOverdraw,
+                                      bounds.width + kCullingOverdraw * 2.0f, bounds.height + kCullingOverdraw * 2.0f});
+}
+
 bool PointInRect(const RectF &rect, const PointF &point)
 {
     return point.x >= rect.x && point.x <= (rect.x + rect.width) && point.y >= rect.y &&
@@ -208,17 +220,19 @@ bool IsSameRect(const RectF &lhs, const RectF &rhs)
 void DrawLayeredMistShadow(ID2D1RenderTarget *target, const RectF &bounds, float radius, float scale, float opacity)
 {
     const float s = std::max(scale, 0.15f);
+    // One brush recolored per layer instead of twenty short-lived ones.
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(target->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.0f), brush.GetAddressOf())))
+    {
+        return;
+    }
     for (int i = 1; i <= 20; ++i)
     {
         const float t = static_cast<float>(i) / 20.0f;
         const float spread = 1.15f * static_cast<float>(i) * s;
         const float offsetY = 0.4f * static_cast<float>(i) * s;
         const float alpha = 0.14f * (1.0f - t) * (1.0f - t) * opacity;
-        ComPtr<ID2D1SolidColorBrush> brush;
-        if (FAILED(target->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, alpha), brush.GetAddressOf())))
-        {
-            continue;
-        }
+        brush->SetColor(D2D1::ColorF(0, 0, 0, alpha));
         const auto rounded = D2D1::RoundedRect(D2D1::RectF(bounds.x - spread, bounds.y - spread + offsetY,
                                                            bounds.x + bounds.width + spread,
                                                            bounds.y + bounds.height + spread + offsetY),
@@ -933,6 +947,16 @@ StackPanel::StackPanel(float spacing) : spacing_(spacing)
 {
 }
 
+void StackPanel::SetSpacing(float spacing)
+{
+    if (spacing_ == spacing)
+    {
+        return;
+    }
+    spacing_ = spacing;
+    InvalidateMeasure();
+}
+
 void StackPanel::SetHorizontalContentAlignment(HorizontalAlignment alignment)
 {
     horizontalContentAlignment_ = alignment;
@@ -974,7 +998,8 @@ void StackPanel::Arrange(const RectF &finalRect)
     const RectF inner = DeflateRect(finalRect, padding_);
 
     float cursorY = ComputeAlignedStart(inner.y, inner.height, measuredContent_.height, verticalContentAlignment_);
-    for (size_t index = 0; index < children_.size(); ++index)
+    // A child added since the last measure has no measurement yet; it waits for the next pass.
+    for (size_t index = 0; index < children_.size() && index < measuredChildren_.size(); ++index)
     {
         const SizeF measured = measuredChildren_[index];
         float slotX = inner.x;
@@ -994,7 +1019,10 @@ void StackPanel::Render(DeviceResources &deviceResources)
 {
     for (const auto &child : children_)
     {
-        child->Render(deviceResources);
+        if (ShouldRenderChild(deviceResources, *child))
+        {
+            child->Render(deviceResources);
+        }
     }
 }
 
@@ -1043,7 +1071,8 @@ void HorizontalStackPanel::Arrange(const RectF &finalRect)
     const RectF inner = DeflateRect(finalRect, padding_);
 
     float cursorX = ComputeAlignedStart(inner.x, inner.width, measuredContent_.width, horizontalContentAlignment_);
-    for (size_t index = 0; index < children_.size(); ++index)
+    // A child added since the last measure has no measurement yet; it waits for the next pass.
+    for (size_t index = 0; index < children_.size() && index < measuredChildren_.size(); ++index)
     {
         const SizeF measured = measuredChildren_[index];
         float slotY = inner.y;
@@ -1063,7 +1092,10 @@ void HorizontalStackPanel::Render(DeviceResources &deviceResources)
 {
     for (const auto &child : children_)
     {
-        child->Render(deviceResources);
+        if (ShouldRenderChild(deviceResources, *child))
+        {
+            child->Render(deviceResources);
+        }
     }
 }
 
@@ -1121,13 +1153,64 @@ void WrapPanel::Render(DeviceResources &deviceResources)
 {
     for (const auto &child : children_)
     {
-        child->Render(deviceResources);
+        if (ShouldRenderChild(deviceResources, *child))
+        {
+            child->Render(deviceResources);
+        }
     }
 }
 
 ScrollViewer::ScrollViewer(std::shared_ptr<Visual> content) : content_(std::move(content))
 {
     AdoptChild(content_);
+}
+
+void ScrollViewer::SetAppearance(const Appearance &appearance)
+{
+    appearance_ = appearance;
+    InvalidateMeasure();
+}
+
+float ScrollViewer::GetScrollOffset() const
+{
+    return scrollOffsetY_;
+}
+
+float ScrollViewer::GetMaxScrollOffset() const
+{
+    return std::max(measuredContent_.height - bounds_.height, 0.0f);
+}
+
+void ScrollViewer::SetScrollOffset(float offset)
+{
+    scrollAnimating_ = false;
+    ApplyScrollOffset(offset);
+}
+
+void ScrollViewer::ScrollIntoView(const RectF &rect)
+{
+    const float top = rect.y - bounds_.y + scrollOffsetY_;
+    const float bottom = top + rect.height;
+    if (top < scrollOffsetY_)
+    {
+        SetScrollOffset(top);
+    }
+    else if (bottom > scrollOffsetY_ + bounds_.height)
+    {
+        SetScrollOffset(std::min(top, bottom - bounds_.height));
+    }
+}
+
+void ScrollViewer::ApplyScrollOffset(float offset)
+{
+    const float clamped = std::clamp(offset, 0.0f, GetMaxScrollOffset());
+    if (clamped == scrollOffsetY_)
+    {
+        return;
+    }
+    scrollOffsetY_ = clamped;
+    UpdateContentLayout();
+    RefreshViewport();
 }
 
 SizeF ScrollViewer::Measure(const SizeF &availableSize)
@@ -1138,6 +1221,13 @@ SizeF ScrollViewer::Measure(const SizeF &availableSize)
     }
 
     measuredContent_ = content_->MeasureInLayout({availableSize.width, 1000000.0f});
+    // Content that overflows loses the scrollbar's width; measure it again at the width
+    // it is going to be arranged at, or wrapped text comes out too short.
+    if (appearance_.reservedWidth > 0.0f && measuredContent_.height > availableSize.height + 0.5f)
+    {
+        measuredContent_ =
+            content_->MeasureInLayout({std::max(availableSize.width - appearance_.reservedWidth, 0.0f), 1000000.0f});
+    }
     return availableSize;
 }
 
@@ -1161,11 +1251,45 @@ void ScrollViewer::Render(DeviceResources &deviceResources)
         return;
     }
 
-    target->PushAxisAlignedClip(
-        D2D1::RectF(bounds_.x, bounds_.y, bounds_.x + bounds_.width, bounds_.y + bounds_.height),
-        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (scrollAnimating_ && window_)
+    {
+        // Exponential approach towards the target, advanced by the real frame time. Unlike
+        // a fixed-duration curve restarted on every notch, the speed never drops back to
+        // zero when the next notch arrives, so a run of notches reads as one motion.
+        const double now = window_->GetFrameTime();
+        const double dt = std::clamp(now - scrollStartMs_, 0.0, 50.0);
+        scrollStartMs_ = now;
+        const double tau = std::max(appearance_.smoothScrollMs / 3.0, 1.0);
+        const float k = static_cast<float>(1.0 - std::exp(-dt / tau));
+        const float maxOffset = GetMaxScrollOffset();
+        scrollTarget_ = std::clamp(scrollTarget_, 0.0f, maxOffset);
+        float offset = scrollOffsetY_ + (scrollTarget_ - scrollOffsetY_) * k;
+        const float pixel = 96.0f / std::max(static_cast<float>(window_->GetDpi()), 1.0f);
+        const bool done = std::fabs(scrollTarget_ - offset) < pixel * 0.5f;
+        if (done)
+        {
+            offset = scrollTarget_;
+        }
+        offset = std::clamp(offset, 0.0f, maxOffset);
+        if (offset != scrollOffsetY_)
+        {
+            scrollOffsetY_ = offset;
+            UpdateContentLayout();
+        }
+        if (done)
+        {
+            scrollAnimating_ = false;
+            window_->RefreshHover();
+        }
+        else
+        {
+            window_->RequestAnimationFrame();
+        }
+    }
+
+    deviceResources.PushClip(bounds_);
     content_->Render(deviceResources);
-    target->PopAxisAlignedClip();
+    deviceResources.PopClip();
 
     if (!HasVerticalScrollbar())
     {
@@ -1175,22 +1299,34 @@ void ScrollViewer::Render(DeviceResources &deviceResources)
     const RectF trackRect = GetScrollbarTrackRect();
     const RectF thumbRect = GetScrollbarThumbRect();
     const Theme &theme = ThemeManager::GetCurrent();
-    ID2D1SolidColorBrush *trackBrush = deviceResources.GetSolidColorBrush(theme.track);
-    ID2D1SolidColorBrush *thumbBrush =
-        deviceResources.GetSolidColorBrush((scrollbarDragging_ || scrollbarHovered_) ? theme.thumbActive : theme.thumb);
-    if (!trackBrush || !thumbBrush)
+    const auto pick = [](const D2D1_COLOR_F &color, const D2D1_COLOR_F &fallback) {
+        return color.a > 0.0f ? color : fallback;
+    };
+    const bool hot = scrollbarDragging_ || (appearance_.hoverThumbOnly ? thumbHovered_ : scrollbarHovered_);
+    ID2D1SolidColorBrush *thumbBrush = deviceResources.GetSolidColorBrush(
+        hot ? pick(appearance_.thumbHoverColor, theme.thumbActive) : pick(appearance_.thumbColor, theme.thumb));
+    if (!thumbBrush)
     {
         return;
     }
 
-    const auto trackRounded = D2D1::RoundedRect(
-        D2D1::RectF(trackRect.x, trackRect.y, trackRect.x + trackRect.width, trackRect.y + trackRect.height), 4.0f,
-        4.0f);
-    const auto thumbRounded = D2D1::RoundedRect(
-        D2D1::RectF(thumbRect.x, thumbRect.y, thumbRect.x + thumbRect.width, thumbRect.y + thumbRect.height), 4.0f,
-        4.0f);
-    target->FillRoundedRectangle(trackRounded, trackBrush);
-    target->FillRoundedRectangle(thumbRounded, thumbBrush);
+    const float radius = appearance_.cornerRadius;
+    if (appearance_.drawTrack)
+    {
+        if (ID2D1SolidColorBrush *trackBrush =
+                deviceResources.GetSolidColorBrush(pick(appearance_.trackColor, theme.track)))
+        {
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(trackRect.x, trackRect.y, trackRect.x + trackRect.width,
+                                              trackRect.y + trackRect.height),
+                                  radius, radius),
+                trackBrush);
+        }
+    }
+    target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(thumbRect.x, thumbRect.y, thumbRect.x + thumbRect.width,
+                                                               thumbRect.y + thumbRect.height),
+                                                   radius, radius),
+                                 thumbBrush);
 }
 
 void ScrollViewer::Attach(Window *window)
@@ -1265,20 +1401,19 @@ bool ScrollViewer::OnMouseDown(const POINT &point, WPARAM keyState)
         return false;
     }
 
-    const RectF thumbRect = GetScrollbarThumbRect();
-    if (PointInRect(thumbRect, dipPoint))
+    scrollAnimating_ = false;
+    RectF thumbRect = GetScrollbarThumbRect();
+    if (dipPoint.y < thumbRect.y || dipPoint.y > thumbRect.y + thumbRect.height)
     {
-        scrollbarDragging_ = true;
-        scrollbarDragOffsetY_ = dipPoint.y - thumbRect.y;
-        return true;
+        // Clicking the track jumps there, then keeps dragging from the thumb's center.
+        const float travel = std::max(trackRect.height - appearance_.thumbInset * 2.0f - thumbRect.height, 1.0f);
+        const float trackTop = trackRect.y + appearance_.thumbInset;
+        const float targetTop = std::clamp(dipPoint.y - thumbRect.height * 0.5f, trackTop, trackTop + travel);
+        ApplyScrollOffset((targetTop - trackTop) / travel * GetMaxScrollOffset());
+        thumbRect = GetScrollbarThumbRect();
     }
-
-    const float trackTravel = std::max(trackRect.height - thumbRect.height, 1.0f);
-    const float targetTop = std::clamp(dipPoint.y - thumbRect.height * 0.5f, trackRect.y, trackRect.y + trackTravel);
-    const float ratio = (targetTop - trackRect.y) / trackTravel;
-    scrollOffsetY_ = ratio * std::max(measuredContent_.height - bounds_.height, 0.0f);
-    ClampScrollOffset();
-    UpdateContentLayout();
+    scrollbarDragging_ = true;
+    scrollbarDragOffsetY_ = dipPoint.y - thumbRect.y;
     RefreshViewport();
     return true;
 }
@@ -1306,9 +1441,11 @@ bool ScrollViewer::OnMouseMove(const POINT &point, WPARAM keyState)
 
     const PointF dipPoint = window_->ClientPixelsToDips(point);
     const bool hovered = PointInRect(GetScrollbarTrackRect(), dipPoint);
-    if (scrollbarHovered_ != hovered)
+    const bool thumbHovered = hovered && PointInRect(GetScrollbarThumbRect(), dipPoint);
+    if (scrollbarHovered_ != hovered || thumbHovered_ != thumbHovered)
     {
         scrollbarHovered_ = hovered;
+        thumbHovered_ = thumbHovered;
         RefreshViewport();
     }
 
@@ -1319,13 +1456,10 @@ bool ScrollViewer::OnMouseMove(const POINT &point, WPARAM keyState)
 
     const RectF trackRect = GetScrollbarTrackRect();
     const RectF thumbRect = GetScrollbarThumbRect();
-    const float trackTravel = std::max(trackRect.height - thumbRect.height, 1.0f);
-    const float targetTop = std::clamp(dipPoint.y - scrollbarDragOffsetY_, trackRect.y, trackRect.y + trackTravel);
-    const float ratio = (targetTop - trackRect.y) / trackTravel;
-    scrollOffsetY_ = ratio * std::max(measuredContent_.height - bounds_.height, 0.0f);
-    ClampScrollOffset();
-    UpdateContentLayout();
-    RefreshViewport();
+    const float trackTop = trackRect.y + appearance_.thumbInset;
+    const float travel = std::max(trackRect.height - appearance_.thumbInset * 2.0f - thumbRect.height, 1.0f);
+    const float targetTop = std::clamp(dipPoint.y - scrollbarDragOffsetY_, trackTop, trackTop + travel);
+    ApplyScrollOffset((targetTop - trackTop) / travel * GetMaxScrollOffset());
     return true;
 }
 
@@ -1338,16 +1472,34 @@ bool ScrollViewer::OnMouseWheel(const POINT &point, short delta, WPARAM keyState
         return false;
     }
 
-    const float maxOffset = std::max(measuredContent_.height - bounds_.height, 0.0f);
+    const float maxOffset = GetMaxScrollOffset();
     if (maxOffset <= 0.0f)
     {
         return false;
     }
 
-    scrollOffsetY_ = std::clamp(scrollOffsetY_ - (static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA)) * 72.0f,
-                                0.0f, maxOffset);
-    UpdateContentLayout();
-    RefreshViewport();
+    const float step = (static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA)) * appearance_.wheelStep;
+    if (appearance_.smoothScrollMs <= 0.0)
+    {
+        ApplyScrollOffset(scrollOffsetY_ - step);
+        return true;
+    }
+
+    // Successive notches extend the glide from where it is heading, not from where it is.
+    const float base = scrollAnimating_ ? scrollTarget_ : scrollOffsetY_;
+    const float target = std::clamp(base - step, 0.0f, maxOffset);
+    if (target == base && !scrollAnimating_)
+    {
+        return true;
+    }
+    scrollTarget_ = target;
+    if (!scrollAnimating_)
+    {
+        // Frame clock of the glide; the first frame advances from now.
+        scrollStartMs_ = NowMs();
+        scrollAnimating_ = true;
+    }
+    window_->RequestAnimationFrame();
     return true;
 }
 
@@ -1358,31 +1510,26 @@ HCURSOR ScrollViewer::GetCursor() const
 
 void ScrollViewer::OnMouseEnter()
 {
-    if (!HasVerticalScrollbar())
-    {
-        return;
-    }
-
-    if (!scrollbarHovered_)
-    {
-        scrollbarHovered_ = true;
-        RefreshViewport();
-    }
 }
 
 void ScrollViewer::OnMouseLeave()
 {
-    if (scrollbarHovered_)
+    if (scrollbarHovered_ || thumbHovered_)
     {
         scrollbarHovered_ = false;
+        thumbHovered_ = false;
         RefreshViewport();
     }
 }
 
 void ScrollViewer::ClampScrollOffset()
 {
-    const float maxOffset = std::max(measuredContent_.height - bounds_.height, 0.0f);
+    const float maxOffset = GetMaxScrollOffset();
     scrollOffsetY_ = std::clamp(scrollOffsetY_, 0.0f, maxOffset);
+    if (scrollAnimating_)
+    {
+        scrollTarget_ = std::clamp(scrollTarget_, 0.0f, maxOffset);
+    }
 }
 
 void ScrollViewer::RefreshViewport()
@@ -1398,20 +1545,22 @@ void ScrollViewer::RefreshViewport()
 
 RectF ScrollViewer::GetScrollbarTrackRect() const
 {
-    constexpr float kScrollbarWidth = 10.0f;
-    return {bounds_.x + bounds_.width - kScrollbarWidth, bounds_.y, kScrollbarWidth, std::max(bounds_.height, 0.0f)};
+    const float width = appearance_.trackWidth;
+    return {bounds_.x + bounds_.width - width, bounds_.y, width, std::max(bounds_.height, 0.0f)};
 }
 
 RectF ScrollViewer::GetScrollbarThumbRect() const
 {
     const RectF trackRect = GetScrollbarTrackRect();
+    const float length = std::max(trackRect.height - appearance_.thumbInset * 2.0f, 0.0f);
     const float visibleRatio =
         bounds_.height > 0.0f ? std::clamp(bounds_.height / std::max(measuredContent_.height, 1.0f), 0.0f, 1.0f) : 1.0f;
-    const float thumbHeight = std::max(trackRect.height * visibleRatio, 36.0f);
-    const float maxOffset = std::max(measuredContent_.height - bounds_.height, 0.0f);
-    const float trackTravel = std::max(trackRect.height - thumbHeight, 0.0f);
+    const float thumbHeight = std::min(std::max(length * visibleRatio, appearance_.thumbMinLength), length);
+    const float maxOffset = GetMaxScrollOffset();
+    const float trackTravel = std::max(length - thumbHeight, 0.0f);
     const float ratio = maxOffset > 0.0f ? scrollOffsetY_ / maxOffset : 0.0f;
-    return {trackRect.x, trackRect.y + trackTravel * ratio, trackRect.width, thumbHeight};
+    const float x = trackRect.x + trackRect.width - appearance_.thumbRightInset - appearance_.thumbWidth;
+    return {x, trackRect.y + appearance_.thumbInset + trackTravel * ratio, appearance_.thumbWidth, thumbHeight};
 }
 
 bool ScrollViewer::HasVerticalScrollbar() const
@@ -1426,9 +1575,17 @@ void ScrollViewer::UpdateContentLayout()
         return;
     }
 
-    const float scrollbarReserve = HasVerticalScrollbar() ? 20.0f : 0.0f;
-    content_->ArrangeInLayout({bounds_.x, bounds_.y - scrollOffsetY_, std::max(bounds_.width - scrollbarReserve, 0.0f),
-                               measuredContent_.height});
+    const float scrollbarReserve = HasVerticalScrollbar() ? appearance_.reservedWidth : 0.0f;
+    // Content moves in whole device pixels: a glide passes through fractional offsets,
+    // which would resample text and hairlines differently on every frame.
+    float offset = scrollOffsetY_;
+    if (window_)
+    {
+        const float scale = window_->GetDpi() / 96.0f;
+        offset = std::round(offset * scale) / scale;
+    }
+    content_->ArrangeInLayout(
+        {bounds_.x, bounds_.y - offset, std::max(bounds_.width - scrollbarReserve, 0.0f), measuredContent_.height});
 
     if (window_)
     {
@@ -1617,7 +1774,10 @@ void Grid::Render(DeviceResources &deviceResources)
 {
     for (auto &child : children_)
     {
-        child.visual->Render(deviceResources);
+        if (ShouldRenderChild(deviceResources, *child.visual))
+        {
+            child.visual->Render(deviceResources);
+        }
     }
 }
 
@@ -1835,7 +1995,7 @@ void Border::Render(DeviceResources &deviceResources)
     Container::Render(deviceResources);
 }
 
-Card::Card(Brush brush, float padding) : brush_(brush), padding_(padding)
+Card::Card(Brush brush, float padding) : brush_(brush), padding_{padding, padding, padding, padding}
 {
 }
 
@@ -1847,7 +2007,13 @@ void Card::SetBrush(Brush brush)
 
 void Card::SetPadding(float padding)
 {
-    if (padding_ == padding)
+    SetPadding(Thickness{padding, padding, padding, padding});
+}
+
+void Card::SetPadding(Thickness padding)
+{
+    if (padding_.left == padding.left && padding_.top == padding.top && padding_.right == padding.right &&
+        padding_.bottom == padding.bottom)
     {
         return;
     }
@@ -1899,8 +2065,8 @@ void Card::SetShadowEnabled(bool enabled)
 
 SizeF Card::Measure(const SizeF &availableSize)
 {
-    const SizeF inner = {std::max(availableSize.width - padding_ * 2.0f, 0.0f),
-                         std::max(availableSize.height - padding_ * 2.0f, 0.0f)};
+    const SizeF inner = {std::max(availableSize.width - padding_.left - padding_.right, 0.0f),
+                         std::max(availableSize.height - padding_.top - padding_.bottom, 0.0f)};
 
     float width = 0.0f;
     float height = 0.0f;
@@ -1911,16 +2077,16 @@ SizeF Card::Measure(const SizeF &availableSize)
         height = std::max(height, childSize_.height);
     }
 
-    return {width + padding_ * 2.0f, height + padding_ * 2.0f};
+    return {width + padding_.left + padding_.right, height + padding_.top + padding_.bottom};
 }
 
 void Card::Arrange(const RectF &finalRect)
 {
     bounds_ = finalRect;
 
-    const RectF inner = {finalRect.x + padding_, finalRect.y + padding_,
-                         std::max(finalRect.width - padding_ * 2.0f, 0.0f),
-                         std::max(finalRect.height - padding_ * 2.0f, 0.0f)};
+    const RectF inner = {finalRect.x + padding_.left, finalRect.y + padding_.top,
+                         std::max(finalRect.width - padding_.left - padding_.right, 0.0f),
+                         std::max(finalRect.height - padding_.top - padding_.bottom, 0.0f)};
 
     for (const auto &child : children_)
     {
@@ -1964,12 +2130,37 @@ void Card::Render(DeviceResources &deviceResources)
 void Card::SetBackgroundImage(std::wstring filePath, ImageStretch stretch, float opacity)
 {
     const float clamped = std::clamp(opacity, 0.0f, 1.0f);
-    if (backgroundImage_ == filePath && backgroundStretch_ == stretch && backgroundOpacity_ == clamped)
+    if (backgroundImage_ == filePath && !backgroundNineSlice_ && backgroundStretch_ == stretch &&
+        backgroundOpacity_ == clamped)
     {
         return;
     }
     backgroundImage_ = std::move(filePath);
+    backgroundNineSlice_ = false;
     backgroundStretch_ = stretch;
+    backgroundOpacity_ = clamped;
+    InvalidateVisual();
+}
+
+void Card::SetBackgroundImageNineSlice(std::wstring filePath, float left, float top, float right, float bottom,
+                                       float opacity)
+{
+    const float clamped = std::clamp(opacity, 0.0f, 1.0f);
+    const float l = (std::max)(0.0f, left);
+    const float t = (std::max)(0.0f, top);
+    const float r = (std::max)(0.0f, right);
+    const float b = (std::max)(0.0f, bottom);
+    if (backgroundImage_ == filePath && backgroundNineSlice_ && sliceLeft_ == l && sliceTop_ == t && sliceRight_ == r &&
+        sliceBottom_ == b && backgroundOpacity_ == clamped)
+    {
+        return;
+    }
+    backgroundImage_ = std::move(filePath);
+    backgroundNineSlice_ = true;
+    sliceLeft_ = l;
+    sliceTop_ = t;
+    sliceRight_ = r;
+    sliceBottom_ = b;
     backgroundOpacity_ = clamped;
     InvalidateVisual();
 }
@@ -2019,6 +2210,44 @@ void Card::RenderBackgroundImage(DeviceResources &deviceResources, ID2D1RenderTa
         return;
     }
     target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clip.Get()), layer.Get());
+    if (backgroundNineSlice_)
+    {
+        // 九宫格：四角原样、四边单向拉伸、中心双向拉伸。切片单位与源图像素一致，
+        // 图像按 96 DPI 绘制时 1 源像素 = 1 DIP。
+        const float srcW = sourceSize.width;
+        const float srcH = sourceSize.height;
+        const float l = (std::min)(sliceLeft_, srcW);
+        const float t = (std::min)(sliceTop_, srcH);
+        const float r = (std::min)(sliceRight_, srcW - l);
+        const float b = (std::min)(sliceBottom_, srcH - t);
+        const float dl = (std::min)(l, bounds_.width);
+        const float dt = (std::min)(t, bounds_.height);
+        const float dr = (std::min)(r, bounds_.width - dl);
+        const float db = (std::min)(b, bounds_.height - dt);
+        const float sx[3] = {0.0f, l, srcW - r};
+        const float sw[3] = {l, srcW - l - r, r};
+        const float dx[3] = {bounds_.x, bounds_.x + dl, bounds_.x + bounds_.width - dr};
+        const float dw[3] = {dl, bounds_.width - dl - dr, dr};
+        const float sy[3] = {0.0f, t, srcH - b};
+        const float sh[3] = {t, srcH - t - b, b};
+        const float dy[3] = {bounds_.y, bounds_.y + dt, bounds_.y + bounds_.height - db};
+        const float dh[3] = {dt, bounds_.height - dt - db, db};
+        for (int row = 0; row < 3; ++row)
+        {
+            for (int col = 0; col < 3; ++col)
+            {
+                if (sw[col] <= 0.0f || sh[row] <= 0.0f || dw[col] <= 0.0f || dh[row] <= 0.0f)
+                {
+                    continue;
+                }
+                target->DrawBitmap(bitmap, D2D1::RectF(dx[col], dy[row], dx[col] + dw[col], dy[row] + dh[row]),
+                                   backgroundOpacity_, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                   D2D1::RectF(sx[col], sy[row], sx[col] + sw[col], sy[row] + sh[row]));
+            }
+        }
+        target->PopLayer();
+        return;
+    }
     target->DrawBitmap(bitmap,
                        D2D1::RectF(destination.x, destination.y, destination.x + destination.width,
                                    destination.y + destination.height),
@@ -2031,14 +2260,13 @@ void Card::RenderShadow(ID2D1RenderTarget *target)
     const bool builtIn = shadowPasses_.empty();
     const ShadowPass *passes = builtIn ? kMistShadowPasses : shadowPasses_.data();
     const size_t count = builtIn ? std::size(kMistShadowPasses) : shadowPasses_.size();
-    if (RenderCachedShadow(target, passes, count))
+    if (shadowCache_.Render(target, bounds_, brush_.radiusX, passes, count, shadowScale_, shadowOpacity_))
     {
         return;
     }
 
     // Uncached path, unchanged from before the cache existed.
-    cachedShadowBitmap_.Reset();
-    cachedShadowTarget_.Reset();
+    shadowCache_.Reset();
     if (builtIn)
     {
         DrawWin11WindowShadow(target, bounds_, brush_.radiusX, shadowScale_, shadowOpacity_);
@@ -2049,9 +2277,16 @@ void Card::RenderShadow(ID2D1RenderTarget *target)
     }
 }
 
-bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passes, size_t count)
+void ShadowCache::Reset()
 {
-    if (bounds_.width <= 0.0f || bounds_.height <= 0.0f || count == 0)
+    bitmap_.Reset();
+    target_.Reset();
+}
+
+bool ShadowCache::Render(ID2D1RenderTarget *target, const RectF &bounds, float radius, const ShadowPass *passes,
+                         size_t count, float scale, float opacity)
+{
+    if (!target || bounds.width <= 0.0f || bounds.height <= 0.0f || count == 0)
     {
         return false;
     }
@@ -2060,7 +2295,7 @@ bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passe
     float dpiY = 96.0f;
     target->GetDpi(&dpiX, &dpiY);
 
-    const float s = std::max(shadowScale_, 0.15f);
+    const float s = std::max(scale, 0.15f);
     float pad = 0.0f;
     for (size_t i = 0; i < count; ++i)
     {
@@ -2072,21 +2307,18 @@ bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passe
     pad = std::ceil(pad);
     // A blurred pixel only sees the shape within pad of itself, so once it is
     // pad + radius inside both ends of an edge it sees a straight edge and has
-    // the same value all along it. A card at least this long on an axis shares
+    // the same value all along it. A box at least this long on an axis shares
     // one bitmap for that axis.
-    const float reach = pad + std::max(brush_.radiusX, 0.0f);
+    const float reach = pad + std::max(radius, 0.0f);
     const float sliceable = std::ceil(reach * 2.0f + kShadowStretchGuard * 2.0f + kShadowStretchSpan);
-    const SizeF blurred = {std::min(bounds_.width, sliceable), std::min(bounds_.height, sliceable)};
+    const SizeF blurred = {std::min(bounds.width, sliceable), std::min(bounds.height, sliceable)};
 
-    const bool hit = cachedShadowBitmap_ && cachedShadowTarget_.Get() == target &&
-                     IsSameSize(cachedShadowSize_, blurred) && cachedShadowRadius_ == brush_.radiusX &&
-                     cachedShadowScale_ == shadowScale_ && cachedShadowOpacity_ == shadowOpacity_ &&
-                     cachedShadowDpiX_ == dpiX && cachedShadowDpiY_ == dpiY && cachedShadowPasses_.size() == count &&
-                     std::equal(cachedShadowPasses_.begin(), cachedShadowPasses_.end(), passes);
+    const bool hit = bitmap_ && target_.Get() == target && IsSameSize(size_, blurred) && radius_ == radius &&
+                     scale_ == scale && opacity_ == opacity && dpiX_ == dpiX && dpiY_ == dpiY &&
+                     passes_.size() == count && std::equal(passes_.begin(), passes_.end(), passes);
     if (!hit)
     {
-        cachedShadowBitmap_.Reset();
-        cachedShadowTarget_.Reset();
+        Reset();
 
         ComPtr<ID2D1BitmapRenderTarget> composed;
         if (FAILED(target->CreateCompatibleRenderTarget({blurred.width + pad * 2.0f, blurred.height + pad * 2.0f},
@@ -2105,8 +2337,8 @@ bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passe
         bool drew = false;
         for (size_t i = 0; i < count; ++i)
         {
-            if (DrawGaussianShadowPass(composed.Get(), composedDc.Get(), local, brush_.radiusX, passes[i].sigma * s,
-                                       passes[i].alpha * shadowOpacity_, passes[i].offsetX * s, passes[i].offsetY * s))
+            if (DrawGaussianShadowPass(composed.Get(), composedDc.Get(), local, radius, passes[i].sigma * s,
+                                       passes[i].alpha * opacity, passes[i].offsetX * s, passes[i].offsetY * s))
             {
                 drew = true;
             }
@@ -2117,24 +2349,24 @@ bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passe
             return false;
         }
 
-        cachedShadowTarget_ = target;
-        cachedShadowBitmap_ = bitmap;
-        cachedShadowSize_ = blurred;
-        cachedShadowRadius_ = brush_.radiusX;
-        cachedShadowScale_ = shadowScale_;
-        cachedShadowOpacity_ = shadowOpacity_;
-        cachedShadowDpiX_ = dpiX;
-        cachedShadowDpiY_ = dpiY;
-        cachedShadowPasses_.assign(passes, passes + count);
+        target_ = target;
+        bitmap_ = bitmap;
+        size_ = blurred;
+        radius_ = radius;
+        scale_ = scale;
+        opacity_ = opacity;
+        dpiX_ = dpiX;
+        dpiY_ = dpiY;
+        passes_.assign(passes, passes + count);
     }
 
     // The cuts sit inside the straight stretch, so whatever sits across them is
     // the same value; drawing the pieces aliased tiles them without seams.
     const float cut = pad + reach + kShadowStretchGuard;
-    const ShadowAxisSlices columns = SliceShadowAxis(blurred.width + pad * 2.0f, bounds_.width + pad * 2.0f, cut);
-    const ShadowAxisSlices rows = SliceShadowAxis(blurred.height + pad * 2.0f, bounds_.height + pad * 2.0f, cut);
-    const float originX = bounds_.x - pad;
-    const float originY = bounds_.y - pad;
+    const ShadowAxisSlices columns = SliceShadowAxis(blurred.width + pad * 2.0f, bounds.width + pad * 2.0f, cut);
+    const ShadowAxisSlices rows = SliceShadowAxis(blurred.height + pad * 2.0f, bounds.height + pad * 2.0f, cut);
+    const float originX = bounds.x - pad;
+    const float originY = bounds.y - pad;
     const D2D1_ANTIALIAS_MODE antialias = target->GetAntialiasMode();
     target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     for (size_t row = 0; row < rows.pieces; ++row)
@@ -2145,7 +2377,7 @@ bool Card::RenderCachedShadow(ID2D1RenderTarget *target, const ShadowPass *passe
                 D2D1::RectF(columns.source[column], rows.source[row], columns.source[column + 1], rows.source[row + 1]);
             const D2D1_RECT_F dest = D2D1::RectF(originX + columns.dest[column], originY + rows.dest[row],
                                                  originX + columns.dest[column + 1], originY + rows.dest[row + 1]);
-            target->DrawBitmap(cachedShadowBitmap_.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, source);
+            target->DrawBitmap(bitmap_.Get(), dest, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, source);
         }
     }
     target->SetAntialiasMode(antialias);

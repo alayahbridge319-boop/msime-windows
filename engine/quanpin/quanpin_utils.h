@@ -29,6 +29,9 @@ bool has_only_complete_pinyin_segments(const Segments &segments);
 // 0: no literal mixed match; 1: whole input; 2: one unfinished 1-2-letter syllable remains.
 // Both full syllables and single-letter initials must match the candidate's canonical key.
 unsigned literal_mixed_pinyin_match(const std::string &raw, const std::string &code, const std::string &canonical);
+// 纯简拼字面整词：两个及以上单字母声母（a/e/o 是完整音节，不算）盖住整串输入，且逐个是
+// 候选正读音节的首字母（nbn = n'b'n -> neng'bu'neng）。前缀单字和带完整音节的混合简拼不算。
+bool literal_jianpin_pinyin_match(const std::string &raw, const std::string &code, const std::string &canonical);
 SyllableGraph build_syllable_graph(const std::string &pinyin);
 std::vector<Segments> enumerate_complete_segmentations(const SyllableGraph &graph, size_t path_limit = 32);
 std::vector<std::string> cut_one_piece_greedy(const std::string &pinyin, bool intact_only);
@@ -37,9 +40,16 @@ std::vector<std::string> cut_one_piece_min_segments(const std::string &pinyin, b
 // ban'an / ba'nan 这类等长歧义边界上分叉。cut_one_piece_min_segments 的结果总在其中。
 std::vector<Segments> enumerate_min_segmentations(const std::string &pinyin, size_t path_limit);
 bool is_complete_pinyin_input(const std::string &pinyin);
+// j/q/x/y 后面的 v 只是 u 的别名（jv、jve、xvan、yvn……）：这几个声母没有保留鱼眼的
+// 合法音节，词库、解码器和双拼都只认 u 写法。
+bool is_jqxy_v_alias(const std::string &syllable);
+// ü 的两种写法归到词库存的那一种：j/q/x/y 系写 u（xvan→xuan），l/n 系的 nue/lue 写 v
+// （→nve/lve），其余原样返回。nu/lu 是真实音节，n/l 系只改整段等于 nue/lue 的。词库查询、
+// 词格和用户词入库共用这一条规则，别再各自维护别名表。
+std::string canonical_umlaut_spelling(std::string syllable);
 // 把切好的全拼串换成 Google 两个解码器（本地 googlepinyinime-rev 与 inputtools
 // 云输入）认的 ü 写法：nve→nue、lve→lue、jv→ju……只在送进这两个解码器前用，
-// 词库与词格查询要的是 canonical_syllable 那一侧的写法。
+// 词库与词格查询要的是 canonical_umlaut_spelling 那一侧的写法。
 std::string to_google_spelling(const std::string &segmentation);
 size_t detect_active_helpcode_length(const std::string &raw_input, const std::string &raw_input_with_cases);
 std::string strip_active_helpcodes(const std::string &raw_input, const std::string &raw_input_with_cases);
@@ -55,10 +65,19 @@ inline constexpr unsigned kAutocorrectNeighbor = 1u << 1;
 // the two existing autocorrect switches (either one on also enables deletion,
 // design D2); it stays a separate bit so a future config key can gate it alone.
 inline constexpr unsigned kAutocorrectDeletion = 1u << 2;
-// Insertion (one extra letter, a repeated or QWERTY-neighbor key) corrections.
-// Same linkage model as deletion: the legacy switches carry this bit too (design
-// D4 of the insertion task); the bit stays independent for a future config key.
+// Insertion (one extra QWERTY-neighbor letter) corrections. Same linkage model
+// as deletion: the legacy switches carry this bit too (design D4 of the
+// insertion task); the bit stays independent for a future config key.
 inline constexpr unsigned kAutocorrectInsertion = 1u << 3;
+
+// 掩码下手误别名层（cut_pinyin_by_mode 的 include_correction_aliases）是否生效。
+// 用户可见的开关只有换位与邻键两位，删除 / 插入位只随它们联动（见 engine.cpp 的
+// autocorrect_types_from_request），所以只带后两位的掩码按「关」处理。方案、词典、
+// 辅助码与排序上下文 key 都按这一条判断，避免各层对同一个掩码给出不同的切分。
+inline constexpr bool correction_aliases_enabled(unsigned autocorrect_types)
+{
+    return (autocorrect_types & (kAutocorrectTransposition | kAutocorrectNeighbor)) != 0;
+}
 
 /**
  * Integer correction-edge weights (patent CN 101133411 B, [0052]).
@@ -67,7 +86,7 @@ inline constexpr unsigned kAutocorrectInsertion = 1u << 3;
  * data (fig. 10); until such calibration data exists it explicitly allows
  * estimated constants, which is what these are. The prior: transpositions are
  * the most common typo, deletions slightly less, insertions next (real extra-key
- * slips are rarer than drops, and the neighbor/double-tap constraint keeps the
+ * slips are rarer than drops, and the QWERTY-neighbor constraint keeps the
  * table small), neighbor substitutions carry the widest false-positive surface
  * (largest table), so they cost the most.
  * Calibration path: mine user_journal for corrected_from candidate hits.
@@ -80,13 +99,13 @@ inline constexpr unsigned kAutocorrectInsertion = 1u << 3;
 inline constexpr int kAutocorrectTranspositionWeight = 10;
 inline constexpr int kAutocorrectDeletionWeight = 11;
 // Between deletion and neighbor: insertion slips are estimated rarer than
-// drops (patent [0052] estimated constant), but the constrained table yields
-// a narrower false-positive surface than neighbor substitutions.
+// drops (patent [0052] estimated constant), and the QWERTY-neighbor constraint
+// keeps the table small.
 inline constexpr int kAutocorrectInsertionWeight = 12;
 inline constexpr int kAutocorrectNeighborWeight = 13;
 
-// Out-of-table generated shapes (non-neighbor substitutions / arbitrary-letter
-// insertions, see CorrectionTarget::generated): fixed expensive-tier weight.
+// Out-of-table generated shapes (non-neighbor substitutions, see
+// CorrectionTarget::generated): fixed expensive-tier weight.
 // These slips are rarer than any in-table shape, and the ranking contract
 // requires them to never displace a table hit on the same wrong key. ponytail:
 // flat constant; calibration path = user_journal confusion priors (direction
@@ -99,7 +118,7 @@ inline constexpr int kAutocorrectGeneratedShapeWeight = 15;
 // user typed while separators follow the actual cut positions. Deletion edges
 // consume one letter less, insertion edges one letter more, than the syllable
 // they produce, so raw_text may differ in length from syllable
-// ("zhng" -> zhang, "shangg" -> shang).
+// ("zhng" -> zhang, "sghang" -> shang).
 struct AutocorrectCutSegment
 {
     std::string syllable;
@@ -122,7 +141,7 @@ struct AutocorrectCut
     // (neighbor gau -> gai, weight 13) regardless of dictionary frequency.
     size_t edge_count = 0;
     int weight = 0;
-    // 读法里有生成式空间的边（静态表之外的远键替换、任意字母插入）。合法输入上的
+    // 读法里有生成式空间的边（静态表之外的远键替换）。合法输入上的
     // 纠错（legal_input_correction_cuts）不认这种读法。
     bool has_generated = false;
 
@@ -162,20 +181,18 @@ Segments autocorrect_cut(const std::string &pinyin, unsigned autocorrect_types);
 // and out-of-table shapes surface only when no static cut explains the input.
 //
 // One caveat that the ranking guarantee does not cover: the generated space hangs
-// its out-of-table SUBSTITUTIONS off kAutocorrectNeighbor and its insertions off
-// kAutocorrectInsertion, so a type bit no longer maps one-to-one onto a table. An
-// input with no static cut at all is now reachable through a single bit -- "sahng"
-// reads as "sa'ang" under the neighbour bit alone, "shng" as "sang". Callers must
-// not read a bit as "only this family of typo".
+// its out-of-table SUBSTITUTIONS off kAutocorrectNeighbor, so that bit no longer
+// maps one-to-one onto a table. An input with no static cut at all is now
+// reachable through the neighbour bit alone -- "sahng" reads as "sa'ang", "shng"
+// as "sang". Callers must not read a bit as "only this family of typo".
 //
 // Scope of that: the BARE-bit readings above are unreachable in the product,
 // because engine.cpp always pairs the deletion and insertion bits with the legacy
 // switches, so the only masks that ever occur are 0 / 0xd / 0xe / 0xf. The
 // generated space itself is NOT unreachable: 0xe and 0xf still carry the
-// neighbour bit and all three carry the insertion bit, so it does add
-// user-visible recall (far substitutions under 0xe/0xf, far insertions under
-// 0xd). That recall is the intended gain, pinned end-to-end by
-// engine/tests/src/test_input_session.cpp ("shatg" -> shang, "zthou" -> zhou).
+// neighbour bit, so it does add user-visible recall (far substitutions under
+// 0xe/0xf). That recall is the intended gain, pinned end-to-end by
+// engine/tests/src/test_input_session.cpp ("shatg" -> shang).
 // The head+jianpin-tail fallback in quanpin_dictionary.cpp additionally masks the
 // neighbour bit off, which suppresses generated substitutions on that path only.
 // Every returned cut contains at least one corrected edge, so a fully legal input

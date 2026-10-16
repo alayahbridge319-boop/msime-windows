@@ -346,9 +346,10 @@ std::string RebuildQuanpinDisplayFromLegalSpelling(const std::string &cased_inpu
 // BFS (shabg -> shang, which only re-separates). Both are rebuilt here from
 // the raw letters with separators at the actual cut positions; when the BFS
 // cannot explain a rewrite (length-changing aliases such as mihng -> ming) the
-// input is shown as typed, with no scheme separators. The rebuild is deliberately
-// switch-independent: the alias layer rewrites letters regardless of the
-// autocorrect switches, and AC1 only constrains the candidate list.
+// input is shown as typed, with no scheme separators. With the correction
+// switches off the scheme alias table no longer rewrites letters, so `base` is
+// already the literal cut and this rebuild is a no-op fast path; the rebuild
+// matters while correction is on, and AC1 only constrains the candidate list.
 std::string BuildQuanpinAutocorrectDisplay(const QueryRequest &request)
 {
     const std::string &cased = request.raw_input_with_cases.empty() ? request.raw_input : request.raw_input_with_cases;
@@ -806,6 +807,11 @@ void InputSession::set_pinyin_sequence_with_cases(const std::string &pinyin_sequ
     has_pending_pinyin_sequence_with_cases_ = true;
 }
 
+void InputSession::set_wubi_literal_input(bool literal)
+{
+    pending_wubi_literal_input_ = literal;
+}
+
 int InputSession::store_user_phrase(std::string pinyin, std::string word)
 {
     return engine_.create_word(std::move(pinyin), std::move(word));
@@ -1165,6 +1171,7 @@ void InputSession::clear_pending_sequence()
     pending_pinyin_sequence_with_cases_.clear();
     has_pending_pinyin_sequence_ = false;
     has_pending_pinyin_sequence_with_cases_ = false;
+    pending_wubi_literal_input_ = false;
 }
 
 void InputSession::apply_pending_sequence()
@@ -1183,7 +1190,7 @@ void InputSession::apply_pending_sequence()
         engine_.replace_quanpin_raw_input(raw_input, raw_input_with_cases);
         break;
     case SchemeType::Wubi:
-        engine_.replace_wubi_raw_input(raw_input, raw_input_with_cases);
+        engine_.replace_wubi_raw_input(raw_input, raw_input_with_cases, pending_wubi_literal_input_);
         break;
     case SchemeType::JapaneseRomaji:
         engine_.replace_japanese_raw_input(raw_input, raw_input_with_cases);

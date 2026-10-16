@@ -50,10 +50,11 @@ namespace quanpin
 // Lattice WordItem.weight is log_prob * 1000 and is often negative. List
 // order is the ranking; do not sort these rows by weight.
 //
-// merge_lattice_candidates inserts at most three rows, not the whole n-best: each
-// reranker's pick and, when enabled, the lattice's own pick. The
-// rest of the n-best exists so the reranker has something to choose from -- several
-// near-identical sentences are a decoder detail, not a candidate list.
+// merge_lattice_candidates inserts at most four rows, not the whole n-best: each
+// reranker's pick, the lattice's own pick (Generated, or Collocation when octagram is
+// on), and when both point at the same sentence only one of them. The rest of the
+// n-best exists so the reranker has something to choose from -- several near-identical
+// sentences are a decoder detail, not a candidate list.
 
 struct LatticeLexeme
 {
@@ -89,6 +90,13 @@ struct LatticePath
 using LatticeCollocationScorer =
     std::function<double(std::string_view context_tail, std::string_view word, bool is_rear)>;
 
+// octagram 的 query() 返回自然对数域的搭配强度（.gram 值 = int(ln(频次) * 10000)），
+// 而词格主分是 log10（engine/ngram/language_model.h）。装配 lambda 用它把 query() 结果
+// 换到 log10 域，让 collocation_weight 退化为纯标定系数（1.0 ≈ librime 的同相对量级），
+// 而不是替一个域错位的量附带做格式转换。数值 = 1/ln(10)，写成字面量是因为
+// std::log 在 C++17 不是 constexpr。
+constexpr double kLnToLog10 = 0.4342944819032518;
+
 struct WordLatticeOptions
 {
     int beam = 32;
@@ -96,6 +104,11 @@ struct WordLatticeOptions
     // Whether the lattice's own best path should become a visible candidate. Neural-only mode sets
     // this to false: the lattice still supplies n-best paths to the reranker, but only its pick is shown.
     bool include_lattice_best = true;
+    // octagram 激活时把解码最优路径（paths.front()）作为一条 CandidateSource::Collocation 行
+    // 展示。单一注入后 octagram 只影响解码，这一行就是它的呈现（〔万象〕/〔八股〕/〔墨奇〕）。
+    // 与 include_lattice_best 同时开且指向同一句时，去重只留一条——Collocation 先取，标签
+    // 因此归属 octagram（它对这句有贡献，标得更诚实）。
+    bool include_collocation_best = false;
     // Each visible source contributes at most one row. When its first choice duplicates an earlier
     // candidate, continue down that source's own ranking until a distinct sentence is found.
     bool show_next_on_duplicate = false;
@@ -139,10 +152,10 @@ struct WordLatticeOptions
     // 字级搭配加成：给「前文尾部字符 + 当前词」的字符级搭配打一个加成分，乘以
     // collocation_weight 后叠加到该边的路径分上。为 octagram（.gram）这类与词表
     // 零耦合的语法模型预留——它们只认字符搭配，不认词表 id，我们词库里没有的词
-    // 查不到就返回常数惩罚，不伤害只错过。返回值域由实现决定，weight 负责把它
-    // 缩放到与主打分同域；那是校准参数，不是格式转换。空函数（默认）= 关闭。
+    // 查不到就返回常数惩罚，不伤害只错过。scorer 返回 log10 域的值（装配方用
+    // kLnToLog10 把 .gram 的自然对数换算过来），weight 是标定系数，空函数（默认）= 关闭。
     LatticeCollocationScorer collocation_scorer;
-    // 搭配项的线性权重；0 = 关闭（scorer 非空也不生效）。
+    // 搭配项的标定系数（log10 域）；0 = 关闭（scorer 非空也不生效）。
     double collocation_weight = 0.0;
     // 调用方已经按同一套打分解出来的 n-best（双拼直接辅助码的解析器选切分时顺带解出了最优整句）。
     // 非空时 merge_lattice_candidates 直接用它，不再重解一遍，其余合并逻辑不变。全拼从不设置。
@@ -178,8 +191,10 @@ std::vector<LatticePath> decode_word_lattice(const Segments &syllables, const Wo
                                              const WordLatticeOptions &options = {});
 
 // `rerank_source` is the source stamped on the reranker's pick, so the candidate list can say which
-// component chose that row. When options.include_lattice_best is true, the lattice's own pick stays
-// CandidateSource::Generated; when false, no row is inserted until the reranker has produced a result.
+// component chose that row. The lattice's own pick is stamped CandidateSource::Generated when
+// options.include_lattice_best is true, or CandidateSource::Collocation when
+// options.include_collocation_best is true (octagram is on; it owns the row when both are set).
+// When neither is set, no lattice row is inserted until a reranker has produced a result.
 void merge_lattice_candidates(std::vector<WordItem> &candidates, const Segments &syllables,
                               const WordLatticeLookup &lookup, const std::string &typed_pinyin,
                               const WordLatticeOptions &options = {}, const LatticeReranker &rerank = {},

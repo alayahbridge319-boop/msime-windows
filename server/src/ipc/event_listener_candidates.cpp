@@ -13,7 +13,7 @@
 #include "ipc/candidate_ui_owner.h"
 #include "ipc/input_key_policy.h"
 #include "utils/common_utils.h"
-#include "fmt/xchar.h"
+#include "utils/hanzi_pinyin.h"
 #include <utf8.h>
 #include "global/globals.h"
 #include "engine/common/helpcode_utils.h"
@@ -24,7 +24,6 @@
 #include "config/ime_config.h"
 #include "settings/collocation_model.h"
 #include "engine/local_modes/quick_phrase_query.h"
-#include "engine/local_modes/unicode_query.h"
 #include "engine/local_modes/date_time_query.h"
 #include "engine/local_modes/emoji_query.h"
 #include "engine/local_modes/kaomoji_query.h"
@@ -160,14 +159,10 @@ std::string DateTimeMixedKeyword(const std::string &current_input, SchemeType sc
     return metasequoia::local_modes::is_date_time_keyword(quanpin) ? quanpin : std::string{};
 }
 
-bool IsUnicodeInput(const std::string &raw)
+// U 模式（部件拆字反查）：唤醒键 U 之后已经输入了至少一个部件字母才算一次可查询的输入。
+bool IsRadicalInput(const std::string &raw)
 {
-    if (!IsUnicodeCompositionActive(raw) || raw.size() <= 1)
-        return false;
-    size_t index = 1;
-    if (raw[index] == '+')
-        ++index;
-    return index < raw.size();
+    return IsRadicalCompositionActive(raw) && raw.size() > 1;
 }
 
 bool IsDateTimeInput(const std::string &raw)
@@ -247,12 +242,19 @@ std::string BuildCurrentCandidatePage()
                                GetConfiguredShowShuangpinHelpcodeInCandidateWindow()) ||
                               (current_scheme == SchemeType::Quanpin && GetConfiguredQuanpinHelpcodeEnabled() &&
                                GetConfiguredShowQuanpinHelpcodeInCandidateWindow()));
+    // U 模式（部件拆字反查）：候选上反显该字的注音。annotation 在这个模式下专属注音，辅助码
+    // 提示不在该模式出现（候选来源是 Generated，本来也不走辅助码的整句规则）。
+    const bool radical_mode =
+        !translation_page && IsRadicalCompositionActive(g_inputSession->get_pinyin_sequence_with_cases());
 
     // 组页时读一次徽标配置，循环内不再逐条查
     const bool show_fixed_badge = GetConfiguredCandidateFixedBadge();
     const std::string fixed_badge_style = GetConfiguredCandidateFixedBadgeStyle();
+    // AI 联想候选的来源徽标随配置切换（🤖 / 🐳），同样每次组页解析一次。
+    const std::string ai_badge = AiSuggestionBadge(GetConfiguredCandidateAiBadgeStyle());
     const bool show_sentence_source_badge = GetConfiguredAssocSentenceSourceBadge();
     const bool show_autocorrect_marker = GetConfiguredQuanpinAutocorrectMarker();
+    const bool show_translation_pos = GetConfiguredCandidateTranslationShowPos();
     // 徽标开启时才解析模型包的来源标签，每次组页解析一次，不逐候选查。标签由目录条目
     // 自己声明（万象/八股/墨奇），各家互不冒名；激活值留空时不产生整句候选，徽章分支
     // 不会被走到。
@@ -282,7 +284,16 @@ std::string BuildCurrentCandidatePage()
             // the marker suffix.
             view.text += "*";
         }
-        if (item.source == CandidateSource::Generated && show_helpcodes)
+        if (radical_mode)
+        {
+            // U 模式：候选上反显该字的注音；扩展区字没有注音时留空，属可接受降级。
+            const std::string pinyin = HanziPinyin::Annotate(item.word);
+            if (!pinyin.empty())
+            {
+                view.annotation = " " + pinyin;
+            }
+        }
+        else if (item.source == CandidateSource::Generated && show_helpcodes)
         {
             // Generated whole-sentence candidates carry the raw spelling in
             // item.pinyin.  When helpcodes are enabled, do not expose that
@@ -300,7 +311,7 @@ std::string BuildCurrentCandidatePage()
         if (item.source == CandidateSource::CloudSuggestion)
             view.badge = " ☁️";
         else if (item.source == CandidateSource::AiSuggestion)
-            view.badge = " 🤖";
+            view.badge = ai_badge;
         // 整句来源标签与设置页名称保持一致，方便同时比较四个来源。两家选中同一句时只剩一行，
         // 标签归先保留下来的来源；开启去重补位后，其余来源会改为显示自己的下一条不同结果。
         // Generated/Fallback 也被原样上屏、英文、日期等合成候选借用，只有引擎标了整句联想的才挂标签。
@@ -320,17 +331,20 @@ std::string BuildCurrentCandidatePage()
         }
         view.fixed_position = item.fixed_position > 0;
         ApplyFixedPositionBadge(view, show_fixed_badge, fixed_badge_style);
+        std::string raw_translation;
         EnglishIme::TranslationQuery translation_query;
         if (!translation_page && BuildTranslationQuery(item, translation_query))
         {
             const auto gloss = g_candidate_translation_glosses.find(TranslationIdentity(translation_query));
             if (gloss != g_candidate_translation_glosses.end())
-                view.translation = gloss->second;
+                raw_translation = gloss->second;
         }
+        view.translation = FanyImeIpc::FormatTranslationGlossForDisplay(raw_translation, show_translation_pos);
         const std::string visible = view.text + view.annotation + view.badge;
         const int display_length = static_cast<int>(utf8::distance(visible.begin(), visible.end()));
         candidate_string += CandidateViewHtml(view);
-        ui.page_glosses.push_back(string_to_wstring(view.translation));
+        // Ctrl+Enter consumes the original senses, independently of display preferences.
+        ui.page_glosses.push_back(string_to_wstring(raw_translation));
         ui.page_views.push_back(std::move(view));
         maxCount = (std::max)(maxCount, display_length);
         ui.page_words.push_back(string_to_wstring(word));
@@ -380,8 +394,7 @@ void PrepareCandidateTranslationRequest()
         }
         return;
     }
-    const std::string scope = fmt::format("{}|{}|{}", GetConfiguredTencentTmt().enabled,
-                                          GetConfiguredCustomTranslation().enabled, GetConfiguredNiuTrans().enabled);
+    const std::string scope = CloudTranslation::ActiveProviderScope();
     if (scope != g_candidate_translation_scope)
     {
         g_candidate_translation_scope = scope;
@@ -474,7 +487,12 @@ std::string CurrentRankingContextKey()
         return converted;
     std::string plain = converted;
     plain.erase(std::remove(plain.begin(), plain.end(), '\''), plain.end());
-    const auto cuts = quanpin::cut_pinyin_by_mode(plain, "correction");
+    // 与引擎侧 InputSession::position_context 同一规则（quanpin::correction_aliases_enabled 只看
+    // 换位、邻键两个开关）：全拼跟纠错开关走，双拼保持原样。
+    const bool correction_aliases = g_inputSession->current_scheme_type() == SchemeType::Shuangpin ||
+                                    GetConfiguredQuanpinAutocorrectTransposition() ||
+                                    GetConfiguredQuanpinAutocorrectNeighbor();
+    const auto cuts = quanpin::cut_pinyin_by_mode(plain, "correction", correction_aliases);
     return cuts.empty() ? converted : quanpin::join_segments(cuts.front());
 }
 
@@ -653,9 +671,10 @@ void PrepareCandidateList(uint64_t client_id, uint64_t activation_epoch)
         // Do not expose transient Chinese/raw fallback candidates while the
         // dedicated English query is in flight.
     }
-    else if (IsUnicodeInput(current_input))
+    else if (IsRadicalInput(current_input))
     {
-        items = metasequoia::local_modes::query_unicode(current_input.substr(1));
+        // 串里混进了 a-z 以外的字符（撇号、大写字母等）时查不到任何字，候选为空。
+        items = g_inputSession->query_radical(current_input.substr(1));
     }
     else if (IsQuickPhraseInput(current_input))
     {

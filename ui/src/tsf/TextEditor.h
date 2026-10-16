@@ -159,6 +159,46 @@ class CTextEditor : public CTextContainer
         _layout.SetColors(textColor, selectionColor);
     }
 
+    // Draws every character as `mask` (0 shows the text). Lengths stay the same, so the
+    // caret, selection and hit testing keep working on the real text.
+    void SetMaskCharacter(WCHAR mask)
+    {
+        _maskCharacter = mask;
+        UpdateLayout();
+    }
+
+    void SetLetterSpacing(FLOAT dips)
+    {
+        _layout.SetLetterSpacing(dips);
+        UpdateLayout();
+    }
+
+    void SetCssLineHeight(FLOAT dips)
+    {
+        _layout.SetCssLineHeight(dips);
+        UpdateLayout();
+    }
+
+    // Width kept free on the right while multi-line text overflows, for a scrollbar.
+    void SetScrollbarGutter(LONG pixels)
+    {
+        _scrollbarGutterPixels = pixels;
+    }
+    BOOL HasVerticalOverflow() const
+    {
+        return _layout.GetMaxVerticalScroll() > 0.0f;
+    }
+    // Returns whether the offset changed; the TSF text extents move with it.
+    BOOL SetVerticalScroll(FLOAT dips)
+    {
+        if (!_layout.SetVerticalScroll(dips))
+        {
+            return FALSE;
+        }
+        NotifyLayoutChange();
+        return TRUE;
+    }
+
   protected:
     void OnTextChanged() override
     {
@@ -169,12 +209,21 @@ class CTextEditor : public CTextContainer
     }
 
   private:
+    const WCHAR *DisplayText();
+
+    WCHAR _maskCharacter = 0;
+    std::wstring _maskedText;
     UINT _nSelStart;
     UINT _nSelEnd;
     HWND _hwnd;
     RECT _rcHost = {};
     RECT _rcContentPadding = {};
     BOOL _singleLine = FALSE;
+    LONG _scrollbarGutterPixels = 0;
+    // Text length and caret of the previous layout: only a change in either scrolls the
+    // caret back into view.
+    UINT _laidOutLength = static_cast<UINT>(-1);
+    UINT _laidOutSelEnd = static_cast<UINT>(-1);
 
     CTextLayout _layout;
     LOGFONT _lfCurrentFont;

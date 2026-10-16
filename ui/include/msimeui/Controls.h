@@ -50,8 +50,62 @@ class TextBox : public Visual
   public:
     using TextChangedHandler = std::function<void(const std::wstring &text)>;
 
+    // Colors with alpha 0 fall back to ThemeManager. Sizes are DIPs.
+    struct Appearance
+    {
+        float cornerRadius = 10.0f;
+        float borderWidth = 1.0f;
+        // Distance from the outer edge to the text.
+        float paddingX = 12.0f;
+        float paddingY = 6.0f;
+        D2D1_COLOR_F fill = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F border = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F hoverBorder = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F focusBorder = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F text = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F selection = D2D1::ColorF(0, 0.0f);
+        D2D1_COLOR_F placeholder = D2D1::ColorF(0, 0.0f);
+        // Empty uses ThemeManager's textInputFontFamily.
+        std::wstring fontFamily;
+        // Applies to the text and the placeholder.
+        DWRITE_FONT_WEIGHT fontWeight = DWRITE_FONT_WEIGHT_NORMAL;
+        // CSS letter-spacing in DIPs, applied to the text (not the placeholder).
+        float letterSpacing = 0.0f;
+        // Multi-line only: CSS line-height in DIPs (0 = the font's own) and the width kept
+        // free on the right for a scrollbar while the text overflows.
+        float lineHeight = 0.0f;
+        float scrollbarGutter = 0.0f;
+    };
+
+    // Vertical scroll state of a multi-line box, in DIPs.
+    struct ScrollInfo
+    {
+        float offset = 0.0f;
+        float maxOffset = 0.0f;
+        float contentHeight = 0.0f;
+        float viewportHeight = 0.0f;
+    };
+
     TextBox(float height, std::wstring placeholder);
     ~TextBox() override;
+
+    void SetAppearance(Appearance appearance);
+    // Replaces the text without reporting it through the text-changed handler: that
+    // handler is for edits the user makes.
+    void SetText(const std::wstring &text);
+    void SetPasswordMode(bool password);
+    void SetMultiline(bool multiline);
+    void SetEnabled(bool enabled);
+    bool IsEnabled() const
+    {
+        return enabled_;
+    }
+    // Enter in a single-line box.
+    void SetOnSubmit(std::function<void()> handler);
+    void SetPreferredHeight(float height);
+    ScrollInfo GetScrollInfo() const;
+    // Clamped; returns whether the text moved.
+    bool SetScrollOffset(float offset);
 
     SizeF Measure(const SizeF &availableSize) override;
     void Arrange(const RectF &finalRect) override;
@@ -63,9 +117,13 @@ class TextBox : public Visual
     bool OnMouseDown(const POINT &point, WPARAM keyState) override;
     bool OnMouseUp(const POINT &point, WPARAM keyState) override;
     bool OnMouseMove(const POINT &point, WPARAM keyState) override;
+    // A multi-line box scrolls its text while it can, then lets the wheel bubble on.
+    bool OnMouseWheel(const POINT &point, short delta, WPARAM keyState) override;
     bool OnKeyDown(WPARAM key, LPARAM lParam) override;
     bool OnChar(wchar_t ch, LPARAM lParam) override;
     bool OnTimer(UINT_PTR timerId) override;
+    void OnMouseEnter() override;
+    void OnMouseLeave() override;
     HCURSOR GetCursor() const override;
     std::wstring GetText() const;
     bool IsFocused() const
@@ -85,9 +143,22 @@ class TextBox : public Visual
     POINT ToLocalPoint(const POINT &point) const;
     bool EnsureInitialized(DeviceResources *deviceResources);
     bool AlertMouseSink(const POINT &point, WPARAM keyState);
+    bool IsMultiline() const;
+    void ApplyFont();
+    void RefreshEditorLayout();
 
     float preferredHeight_ = 44.0f;
     std::wstring placeholder_;
+    Appearance appearance_{};
+    bool password_ = false;
+    int multiline_ = -1; // -1 derives it from the height, as before SetMultiline existed
+    bool enabled_ = true;
+    bool hovered_ = false;
+    bool suppressTextChanged_ = false;
+    // Text set before the editor's TSF store exists; applied once it does.
+    std::wstring pendingText_;
+    bool hasPendingText_ = false;
+    std::function<void()> onSubmit_;
     bool focused_ = false;
     bool tsfInitialized_ = false;
     bool renderInitialized_ = false;
@@ -152,6 +223,14 @@ class Popup : public Visual
     void SetBorderColor(const D2D1_COLOR_F &border);
     void SetCornerRadius(float radius);
     void SetShadowEnabled(bool enabled);
+    // Gaussian shadow passes (CSS box-shadow: sigma = blur / 2) replacing the built-in
+    // layered shadow; empty keeps the built-in one.
+    void SetShadowPasses(std::vector<ShadowPass> passes);
+    // A 1 DIP line just inside the top edge, like `box-shadow: inset 0 1px color`.
+    void SetTopHighlight(const D2D1_COLOR_F &color);
+    // Fades in from transparent while sliding by `fromOffsetY` and scaling up from
+    // `fromScale` about the popup's center. Call right after adding it to the scene.
+    void BeginAppearAnimation(double durationMs, float fromOffsetY, float fromScale);
 
     SizeF Measure(const SizeF &availableSize) override;
     void Arrange(const RectF &finalRect) override;
@@ -164,6 +243,9 @@ class Popup : public Visual
     bool KeepsPopupsOpenOnClick() const override;
     void LayoutOverlay(const SizeF &viewportSize) override;
 
+  protected:
+    void RenderChrome(DeviceResources &deviceResources);
+
   private:
     std::shared_ptr<Visual> child_;
     RectF anchorRect_ = {};
@@ -174,8 +256,17 @@ class Popup : public Visual
     bool constrainToViewport_ = true;
     D2D1_COLOR_F backgroundFill_ = D2D1::ColorF(0xFFFFFF);
     D2D1_COLOR_F borderColor_ = D2D1::ColorF(0xD6DCE5);
+    D2D1_COLOR_F topHighlight_ = D2D1::ColorF(0, 0.0f);
     float cornerRadius_ = 16.0f;
     bool shadowEnabled_ = false;
+    std::vector<ShadowPass> shadowPasses_;
+    ShadowCache shadowCache_;
+    double appearStartMs_ = 0.0;
+    double appearDurationMs_ = 0.0;
+    float appearOffsetY_ = 0.0f;
+    float appearScale_ = 1.0f;
+    Microsoft::WRL::ComPtr<ID2D1Layer> layer_;
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> layerTarget_;
 };
 
 class MenuFlyoutItem : public Visual

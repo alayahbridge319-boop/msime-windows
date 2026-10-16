@@ -52,6 +52,30 @@ class Window
     void SetDragRegionHeight(float height);
     void SetRoundedCorners(bool enabled);
     void SetInitialPlacement(WindowInitialPlacement placement, int bottomMargin = 12);
+    // Hosts that own the message loop (an adopted HWND in a larger application) keep
+    // running after this window goes away.
+    void SetQuitOnDestroy(bool quit);
+    // Replaces ThemeManager's windowBackground as the color each frame is cleared to.
+    void SetBackgroundColor(const D2D1_COLOR_F &color);
+    void SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE mode);
+    // Presents through a DirectComposition swap chain instead of an HWND render target.
+    // Needed by windows whose frame is drawn by the app over DWM's extended frame, where
+    // an HWND target's output is not composited; it also avoids the redirection copy.
+    // `opaque` ignores alpha, which an opaque window needs for ClearType text.
+    void SetCompositionRendering(bool enabled, bool opaque = false);
+    // Caret blinking for TextBox. Create() starts it; an adopted HWND has to ask.
+    void StartCaretTimer();
+
+    // Schedules another frame after the current one. Animated visuals call this from
+    // Render while they are still moving, so frames keep coming at the display rate
+    // and stop on their own when everything has settled.
+    void RequestAnimationFrame();
+    // Timestamp of the frame being rendered (NowMs() outside of painting). Every
+    // animation sampled in one frame sees the same time.
+    double GetFrameTime() const;
+    // Re-evaluates which visual is under the cursor, e.g. after content scrolled or
+    // was replaced without the mouse moving.
+    void RefreshHover();
 
     void SetScene(std::unique_ptr<Scene> scene);
 
@@ -61,6 +85,8 @@ class Window
     void OnPaint();
     void OnSize();
     bool OnMouseWheel(WPARAM wParam, LPARAM lParam);
+    LRESULT OnLeftButtonDown(WPARAM wParam, LPARAM lParam);
+    void UpdateHover(const POINT &point);
     void SetFocusedVisual(Visual *visual);
     bool UpdateCursorForClientPoint(const POINT &point);
 
@@ -85,5 +111,13 @@ class Window
     int initialBottomMargin_ = 12;
     bool stealFocusOnClick_ = true;
     bool adoptedHwnd_ = false;
+    bool quitOnDestroy_ = true;
+    bool hasBackgroundColor_ = false;
+    D2D1_COLOR_F backgroundColor_ = {};
+    D2D1_TEXT_ANTIALIAS_MODE textAntialiasMode_ = D2D1_TEXT_ANTIALIAS_MODE_DEFAULT;
+    bool painting_ = false;
+    bool composition_ = false;
+    bool animationRequested_ = false;
+    double frameTimeMs_ = 0.0;
 };
 } // namespace msimeui

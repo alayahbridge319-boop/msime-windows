@@ -6,6 +6,7 @@
 #include "../../contracts/dictionary/format.h"
 #include "../../quanpin/quanpin_query.h"
 #include "../../quanpin/quanpin_utils.h"
+#include "../../schemes/quanpin_scheme.h"
 #include "../../shuangpin/shuangpin_profile.h"
 
 #include <sqlite3.h>
@@ -198,7 +199,21 @@ void run_umlaut_alias_session_tests(const std::filesystem::path &data_directory)
                          "INSERT INTO tbl_1_l VALUES('lv', 'l', '绿', 90);"
                          "INSERT INTO tbl_1_l VALUES('lu', 'l', '路', 80);");
         database.execute("CREATE TABLE tbl_1_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_1_j VALUES('jue', 'j', '决', 100);");
+                         "INSERT INTO tbl_1_j VALUES('jue', 'j', '决', 100);"
+                         "INSERT INTO tbl_1_j VALUES('juan', 'j', '捐', 100);"
+                         "INSERT INTO tbl_1_j VALUES('jun', 'j', '军', 100);");
+        database.execute("CREATE TABLE tbl_1_q(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_q VALUES('quan', 'q', '全', 100);"
+                         "INSERT INTO tbl_1_q VALUES('qun', 'q', '群', 100);");
+        database.execute("CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_x VALUES('xu', 'x', '需', 100);"
+                         "INSERT INTO tbl_1_x VALUES('xuan', 'x', '选', 100);"
+                         "INSERT INTO tbl_1_x VALUES('xun', 'x', '巡', 100);");
+        database.execute("CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_y VALUES('yuan', 'y', '原', 100);"
+                         "INSERT INTO tbl_1_y VALUES('yun', 'y', '云', 100);");
+        database.execute("CREATE TABLE tbl_2_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_2_x VALUES('xu''an', 'xa', '虚案', 100);");
         database.execute("CREATE TABLE tbl_1_e(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
                          "INSERT INTO tbl_1_e VALUES('e', 'e', '鹅', 50);");
         database.execute("CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
@@ -211,6 +226,56 @@ void run_umlaut_alias_session_tests(const std::filesystem::path &data_directory)
     paths.cache = directory;
     paths.dictionaries = directory;
     const unsigned both = quanpin::kAutocorrectTransposition | quanpin::kAutocorrectNeighbor;
+
+    // jqxy + van/vn are complete syllables, regardless of the autocorrection setting
+    const struct
+    {
+        const char *alias;
+        const char *canonical;
+        const char *word;
+    } aliases[] = {{"xvan", "xuan", "选"}, {"xvn", "xun", "巡"}, {"jvan", "juan", "捐"}, {"jvn", "jun", "军"},
+                   {"qvan", "quan", "全"}, {"qvn", "qun", "群"}, {"yvan", "yuan", "原"}, {"yvn", "yun", "云"}};
+    for (const auto &test : aliases)
+    {
+        for (const auto mask : {0u, both})
+        {
+            metasequoia::InputSession session(SchemeType::Quanpin, mask, true, true, false, paths);
+            type(session, test.alias);
+            require(session.get_pinyin_segmentation_with_cases() == test.alias && session.preedit() == test.alias,
+                    "An umlaut alias must stay a single syllable with the original preedit.");
+            const auto index = candidate_index(session, test.word);
+            const auto &item = session.candidates()[index];
+            require(item.pinyin == test.canonical && item.corrected_from == test.alias &&
+                        item.source == CandidateSource::Database,
+                    "An umlaut alias must resolve to the canonical dictionary entry.");
+            require(session.select_candidate(index).commit == test.word && !session.has_composition(),
+                    "Selecting an umlaut alias must consume the whole syllable.");
+        }
+        require(quanpin::to_google_spelling(test.alias) == test.canonical,
+                "Decoder spelling must canonicalize complete umlaut aliases.");
+    }
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, false, paths);
+        type(session, "xv'an");
+        require(session.preedit() == "xv'an" && find_candidate_index(session, "选") == session.candidates().size(),
+                "An explicit separator must not be merged into an umlaut syllable.");
+        require(session.select_candidate(candidate_index(session, "虚案")).commit == "虚案",
+                "Explicitly separated umlaut syllables must keep their dictionary reading.");
+    }
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, false, paths);
+        SentenceAssociationOptions association;
+        association.word_lattice = true;
+        session.set_sentence_association(association);
+        type(session, "xvanqvn");
+        const auto index = candidate_index(session, "选群");
+        require(session.candidates()[index].source == CandidateSource::Generated,
+                "The word lattice must compose canonical entries from umlaut aliases.");
+        require(session.select_candidate(index).commit == "选群" && !session.has_composition(),
+                "A composed umlaut phrase must consume both syllables.");
+        require(quanpin::to_google_spelling("xvan'qvn") == "xuan'qun",
+                "Decoder spelling must preserve syllable separators.");
+    }
 
     // AC1 + preedit 非回归：nue 命中 nve 行并带标记，preedit 仍画原样字母。
     {
@@ -247,6 +312,21 @@ void run_umlaut_alias_session_tests(const std::filesystem::path &data_directory)
         const auto found = find_candidate_index(session, "略");
         require(found < session.candidates().size() && session.candidates()[found].corrected_from.empty(),
                 "The standard spelling 'lve' must stay unmarked.");
+    }
+
+    // R2 例外：纠错全关时 ü 归一（非手误）仍然生效——nue -> nve、lve 直接命中。
+    // 只断言可达（nue 另有 nu'e 读法与它竞争，谁领衔由词频裁决，与开关无关）。
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, true, paths);
+        type(session, "nue");
+        require(find_candidate_index(session, "虐") < session.candidates().size(),
+                "The ü alias rewrite must stay active for 'nue' with autocorrection off.");
+    }
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, true, paths);
+        type(session, "lve");
+        require(find_candidate_index(session, "略") < session.candidates().size(),
+                "The standard 'lve' spelling must stay reachable with autocorrection off.");
     }
 
     // AC3：jqxy 系既有归一从无标变带标（行为变更），标准拼法无标。
@@ -675,8 +755,11 @@ void run_literal_mixed_pinyin_tests(const std::filesystem::path &data_directory)
                 session.candidates().front().word == "看电影",
             "Explicit frequency pinning must still reorder words within the literal group.");
     session.enable_fixed_positions();
-    require(session.set_candidate_position(candidate_index(session, "看样"), 1).handled &&
-                session.candidates().front().word == "看样",
+    // 用「看到」（输入字面就能命中的混合简拼候选）。此前这里用「看样」——它靠
+    // 生成式远键插入 kand->kan 与简拼尾 y 组合出 kan'y 才出现；本任务移除远键
+    // 插入后该读法不再存在，改用一个不依赖它的候选验固定位置优先级。
+    require(session.set_candidate_position(candidate_index(session, "看到"), 1).handled &&
+                session.candidates().front().word == "看到",
             "Explicit fixed positions must take precedence over the default mixed-pinyin order.");
     metasequoia::InputSession cased(SchemeType::Quanpin, 3u, false, true, false, paths);
     cased.handle_engine_key('K', 0, 'K');
@@ -930,8 +1013,8 @@ void run_autocorrect_context_user_choice_tests(const std::filesystem::path &data
     }
 }
 
-// 合法输入上的手误：ziazheliya 切成 zi'a'zhe'li'ya、jioa 切成 ji'o'a、jiuzheeyang 切成
-// jiu'zhe'e'yang，每一段都合法，纠错入口的闸原本把它们整个挡在外面。现在按噪声信道
+// 合法输入上的手误：ziazheliya 切成 zi'a'zhe'li'ya、jioa 切成 ji'o'a、niohao 切成
+// ni'o'hao，每一段都合法，纠错入口的闸原本把它们整个挡在外面。现在按噪声信道
 // 整句打分：词格路径分 - 每处纠正的代价（换位 2.0，多字/漏字 3.0），原读法代价 0。
 // fixture 无 sc.lm，词格走启发式
 // （单字 ln(w/1e6)，词组 ln(w)+3×音节数），下面每组的分数都按它算好写在注释里。
@@ -963,8 +1046,8 @@ void run_legal_input_correction_tests(const std::filesystem::path &data_director
     require(readings("lia", {"lia"}, transposition).empty(),
             "A single rare syllable has no context and must stay uncorrected.");
     require(
-        offers(readings("jiuzheeyang", {"jiu", "zhe", "e", "yang"}, quanpin::kAutocorrectInsertion), "jiu'zhe'yang"),
-        "An extra letter that splits off a zero-initial syllable must offer the corrected reading.");
+        offers(readings("niohao", {"ni", "o", "hao"}, quanpin::kAutocorrectInsertion), "ni'hao"),
+        "An extra QWERTY-neighbor letter that splits off a zero-initial syllable must offer the corrected reading.");
     require(readings("ziazheli", {"zi", "a", "zhe", "li"}, quanpin::kAutocorrectNeighbor).empty(),
             "Neighbor substitutions must stay off on legal input.");
     require(
@@ -1075,19 +1158,18 @@ void run_legal_input_correction_tests(const std::filesystem::path &data_director
         require(session.get_pinyin_segmentation_with_cases() == "jioa",
                 "A single corrected syllable must drop the literal ji'o'a separators.");
     }
-    // 多打一个 e（改变字母数，代价 3.0）：就这样 = ln5000+9-3 = 14.5，就这恶养全是单字
-    // = -2.2。字面切分不是真词，
-    // 纠错领衔，原读法紧跟在第 2 位；预编辑按纠错切分的原始区间分隔，整词上屏吃掉全部字母。
+    // 多打一个邻键元音（o 是 i 的邻键）：zaiozheli 字面切成 zai'o'zhe'li 全合法，
+    // 纠错读法 zai'zhe'li 命中「在这里」并带 corrected_from（双击重复键已不算多字
+    // 纠错，见 test_pinyin 的 shangg 断言；这里改用邻键插入验长度改变读法的会话链路）。
     {
         metasequoia::InputSession session(SchemeType::Quanpin, both, true, true, true, paths);
-        type(session, "jiuzheeyang");
-        require(first_two(session, "就这样", "就"),
-                "jiuzheeyang must lead with 就这样 and keep the uncorrected reading second.");
-        require(session.get_pinyin_segmentation_with_cases() == "jiu'zhee'yang",
-                "The preedit must follow the raw spans of the leading insertion correction.");
-        const auto committed = session.select_candidate(static_cast<std::size_t>(0));
-        require(committed.commit == "就这样" && !session.has_composition(),
-                "Selecting the insertion-corrected sentence must consume every typed letter.");
+        type(session, "zaiozheli");
+        const auto found = find_candidate_index(session, "在这里");
+        require(found < session.candidates().size() && session.candidates()[found].corrected_from == "zaiozheli",
+                "A neighbor-inserted vowel must still reach the corrected phrase end to end.");
+        const auto committed = session.select_candidate(found);
+        require(committed.commit == "在这里" && !session.has_composition(),
+                "Selecting the neighbor-insertion corrected phrase must consume every typed letter.");
     }
 
     // 字面切分是真词（数额）时不认改变字母数的读法：shue 按多一个 u 读成 she 的「社」
@@ -1190,10 +1272,10 @@ void run_legal_input_correction_tests(const std::filesystem::path &data_director
     std::filesystem::remove_all(directory);
 }
 
-// 贵档读法在上下文明显更好时可以领衔：shiideya 的换位读法 shi + ide->die（权重 10，
-// 是爹呀）比多字读法 shii->shi（权重 12，是的呀）便宜一档，按旧规则贵档永远排在最后。
-// fixture 无 sc.lm，启发式打分：是的(ln10000+6) + 呀(ln0.5) - 2.4 = 14.1，
-// 是 + 爹 + 呀 全是单字 = ln0.9 + ln0.01 + ln0.5 - 2.0 = -7.4。
+// 贵档读法在上下文明显更好时可以领衔：sahngna 的换位读法 sahng->shang（权重 10，
+// 上+拿）比邻键插入读法 sahng->sang（权重 12，桑拿）便宜一档，按旧规则贵档永远排在
+// 最后。fixture 无 sc.lm，启发式打分：桑拿(ln10000+6) - 2.4 = 15.2，上+拿全是单字
+// = ln0.9 + ln0.9 - 2.0 = -1.8。（双击/远键插入已随 R1 移除，本用例改用邻键插入。）
 void run_autocorrect_costlier_context_tests(const std::filesystem::path &data_directory)
 {
     const std::filesystem::path directory = data_directory / "autocorrect-costlier-context";
@@ -1201,14 +1283,12 @@ void run_autocorrect_costlier_context_tests(const std::filesystem::path &data_di
     {
         Database database(directory / "msime.db");
         database.execute("CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_1_s VALUES('shi', 's', '是', 900000);");
+                         "INSERT INTO tbl_1_s VALUES('shang', 's', '上', 900000);"
+                         "INSERT INTO tbl_1_s VALUES('sang', 's', '桑', 900000);");
         database.execute("CREATE TABLE tbl_2_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_2_s VALUES('shi''de', 'sd', '是的', 10000);");
-        database.execute("CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_1_d VALUES('die', 'd', '爹', 10000);"
-                         "INSERT INTO tbl_1_d VALUES('de', 'd', '的', 900000);");
-        database.execute("CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_1_y VALUES('ya', 'y', '呀', 500000);");
+                         "INSERT INTO tbl_2_s VALUES('sang''na', 'sn', '桑拿', 10000);");
+        database.execute("CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_n VALUES('na', 'n', '拿', 900000);");
     }
 
     metasequoia::RuntimePaths paths;
@@ -1223,24 +1303,103 @@ void run_autocorrect_costlier_context_tests(const std::filesystem::path &data_di
     {
         metasequoia::InputSession session(SchemeType::Quanpin, both, true, true, true, paths);
         session.set_sentence_association(lattice_only);
-        type(session, "shiideya");
-        require(!session.candidates().empty() && session.candidates().front().word == "是的呀",
-                "A costlier correction the context clearly prefers must lead.");
-        require(find_candidate_index(session, "是爹呀") < session.candidates().size(),
-                "The cheaper correction must stay available.");
-        require(session.get_pinyin_segmentation_with_cases() == "shii'de'ya",
-                "The preedit must follow the leading costlier correction.");
+        type(session, "sahngna");
+        require(!session.candidates().empty() && session.candidates().front().word == "桑拿",
+                "A costlier neighbor-insertion correction the context clearly prefers must lead.");
+        require(session.get_pinyin_segmentation_with_cases() == "sahng'na",
+                "The preedit must follow the promoted costlier correction.");
     }
-    // 只开万象重排、不显示 Trigram 整句（用户实际配置）：上下文消解照样生效。fixture
-    // 没有 .gram，重排不出整句行，贵档胜者由它的最长前缀词「是的」领衔。
+    // 只开万象来源行、不显示 Trigram 整句（用户实际配置）：上下文消解照样生效。fixture
+    // 没有 .gram，出不了〔万象〕整句行，贵档胜者由它的最长前缀词「桑拿」领衔。
     {
-        SentenceAssociationOptions rerank_only;
-        rerank_only.collocation_rerank = true;
+        SentenceAssociationOptions collocation_only;
+        collocation_only.collocation_rerank = true;
         metasequoia::InputSession session(SchemeType::Quanpin, both, true, true, true, paths);
-        session.set_sentence_association(rerank_only);
-        type(session, "shiideya");
-        require(!session.candidates().empty() && session.candidates().front().word == "是的",
+        session.set_sentence_association(collocation_only);
+        type(session, "sahngna");
+        require(!session.candidates().empty() && session.candidates().front().word == "桑拿",
                 "The context rerank must run whenever any sentence source is on, not only the Trigram row.");
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
+// 纠错开关关掉后，查询之外的几条路径也必须按字面切分，否则它们和查询落在不同的键上：
+// - 写回：选中后调频要把字面键 hao'yong'a 的行改掉，而不是别名重切出的 hao'yong'ga；
+// - 辅助码：带辅助码的输入自己切底串，不能让 haoyonga 经别名层变成 hao'yong'ga（辅助码只在底串是完整拼音时生效）；
+// - 固定位置：laing 的上下文 key 不能被切成 liang，和真正输入 liang 的那组混到一起。
+void run_autocorrect_off_consistency_tests(const std::filesystem::path &data_directory)
+{
+    const std::filesystem::path directory = data_directory / "autocorrect-off-consistency";
+    std::filesystem::create_directories(directory);
+    write_file(directory / "helpcodes" / "helpcode.txt", "好=ef\n用=gh\n啊=ij\n阿=kl\n");
+    {
+        Database database(directory / "msime.db");
+        database.execute("CREATE TABLE tbl_3_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_3_h VALUES('hao''yong''a', 'hya', '好用啊', 100);"
+                         "INSERT INTO tbl_3_h VALUES('hao''yong''a', 'hya', '好用阿', 200);"
+                         "INSERT INTO tbl_3_h VALUES('hao''yong''ga', 'hyg', '好用嘎', 300);");
+
+        database.execute("CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_l VALUES('lai', 'l', '来', 200);"
+                         "INSERT INTO tbl_1_l VALUES('liang', 'l', '两', 200);");
+    }
+
+    metasequoia::RuntimePaths paths;
+    paths.resources = directory;
+    paths.user_data = directory;
+    paths.cache = directory;
+    paths.dictionaries = directory;
+
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, true, paths);
+        type(session, "haoyonga");
+        require(session.select_candidate(candidate_index(session, "好用啊")).commit == "好用啊",
+                "The literal reading of haoyonga must be selectable with autocorrection off.");
+        Database database(directory / "msime.db");
+        require(database.query_integer("SELECT weight FROM tbl_3_h WHERE value='好用啊'") > 100,
+                "Learning a pick with autocorrection off must update the literal key it was queried under.");
+    }
+
+    {
+        metasequoia::InputSession helpcode(SchemeType::Quanpin, 0u, true, true, true, paths);
+        helpcode.set_quanpin_helpcode_enabled(true);
+        require(helpcode.set_helpcode_schema("lantian"), "The helpcode fixture was not selected.");
+        type(helpcode, "haoyongaK");
+        require(find_candidate_index(helpcode, "好用啊") < helpcode.candidates().size(),
+                "With autocorrection off a helpcode must still offer the literal reading hao'yong'a.");
+        require(find_candidate_index(helpcode, "好用嘎") == helpcode.candidates().size(),
+                "With autocorrection off a helpcode must not query the alias re-cut hao'yong'ga.");
+    }
+
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, true, paths);
+        session.enable_fixed_positions();
+        type(session, "laing");
+        const auto index = candidate_index(session, "来");
+        const auto selected = session.candidates()[index];
+        require(session.set_candidate_position(index, 2).handled, "Pinning a literal candidate must succeed.");
+        const auto key = selected.canonical_pinyin.empty() ? selected.pinyin : selected.canonical_pinyin;
+        const auto journal = metasequoia::path_to_utf8(paths.user(metasequoia::assets::user_journal));
+        require(!user_dictionary::is_fixed(journal, "liang", key, selected.word),
+                "With autocorrection off, laing must not pin into the liang context.");
+        const auto literal = quanpin::cut_pinyin_by_mode("laing", "correction", false);
+        require(!literal.empty() &&
+                    user_dictionary::is_fixed(journal, quanpin::join_segments(literal.front()), key, selected.word),
+                "With autocorrection off, laing must pin under its literal context.");
+    }
+
+    // 方案与词典按同一条规则读掩码：只带删除 / 插入位的掩码在词典侧按「关」处理，方案也不能
+    // 跑别名层，否则预编辑显示纠正、候选却按未纠正查。
+    {
+        QuanpinScheme scheme;
+        scheme.set_raw_input("sahng", "sahng");
+        scheme.set_autocorrect_types(quanpin::kAutocorrectDeletion | quanpin::kAutocorrectInsertion);
+        require(scheme.build_request().segmentation != "shang",
+                "A mask without the user-facing bits must not run the alias layer in the scheme.");
+        scheme.set_autocorrect_types(quanpin::kAutocorrectTransposition);
+        require(scheme.build_request().segmentation == "shang",
+                "The transposition switch must run the alias layer in the scheme.");
     }
 
     std::filesystem::remove_all(directory);
@@ -1436,9 +1595,12 @@ void run_autocorrect_selection_consumption_tests(const std::filesystem::path &da
 }
 
 // 阶段 2 生成式纠错空间（任务 quanpin-autocorrect-generated-space）：静态表
-// 形状之外的单编辑手误由生成式索引兜底，权重落贵档（15）。隔离 fixture：
+// 形状之外的单编辑手误由生成式索引兜底，权重落贵档（15）。本任务把生成式的
+// 「任意字母插入」分片移除（远键插入不再是纠错形状），只保留远键替换。
+// 隔离 fixture：
 // - shatg = shang 的 n→t（t 非邻键，远键替换）
-// - zthou = zhou 的 z/h 之间插 t（t 不在静态覆盖集，远键插入）
+// - schang：远键插入（c 既非 s 的邻键也非 h 的邻键），本任务后不得再纠错
+//   （移除断言；不用 shxang——它同时是 shuang 的远键替换，会留下替换读法）
 // - chng 同键双读：chng→chang（静态漏字 11）与 chng→cang（生成 15），
 //   静态最优时生成切分整体丢弃——静态优先语义的判别性断言
 // - shatngzh = head shatng + 简拼尾 zh：head 组合路径同享静态优先
@@ -1450,8 +1612,6 @@ void run_autocorrect_generated_space_tests(const std::filesystem::path &data_dir
         Database database(directory / "msime.db");
         database.execute("CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
                          "INSERT INTO tbl_1_s VALUES('shang', 's', '上', 900);");
-        database.execute("CREATE TABLE tbl_1_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                         "INSERT INTO tbl_1_z VALUES('zhou', 'z', '周', 900);");
         database.execute("CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
                          "INSERT INTO tbl_1_c VALUES('chang', 'c', '长', 900);"
                          "INSERT INTO tbl_1_c VALUES('cang', 'c', '仓', 5000);");
@@ -1477,16 +1637,16 @@ void run_autocorrect_generated_space_tests(const std::filesystem::path &data_dir
                 "A far-substitution typo must be corrected to 上 with the typed letters recorded.");
     }
 
-    // 远键插入（词中位）：zthou → zhou（t 不在 z/h 的覆盖集）。fixture 特意
-    // 选无竞争切分的输入：zhwou 这类插入位会拼出 [zha(w 邻键替换)+ou] 等更
-    // 便宜的合法切分（权重 13 < 15），生成读法按契约排后被前缀候选遮蔽——
-    // 那是排序语义，不是生成类失效。zthou 无任何竞争切分，唯一读即纠错读法。
+    // 远键插入（③）已随本任务移除：schang（c 既非 s 的邻键也非 h 的邻键，且不是
+    // 任何合法音节的远键替换）必须不再有纠错读法。
     {
         metasequoia::InputSession session(SchemeType::Quanpin, both, true, true, true, paths);
-        type(session, "zthou");
-        const auto found = find_candidate_index(session, "周");
-        require(found < session.candidates().size() && session.candidates()[found].corrected_from == "zthou",
-                "A far-insertion typo must be corrected to 周 with the typed letters recorded.");
+        type(session, "schang");
+        require(quanpin::autocorrect_cut("schang", both).empty(),
+                "Far-key insertions were removed: schang must have no correction cut.");
+        require(std::none_of(session.candidates().begin(), session.candidates().end(),
+                             [](const WordItem &item) { return !item.corrected_from.empty(); }),
+                "Far-key insertions were removed: schang must produce no corrected candidate.");
     }
 
     // 静态优先语义：chng = chang 漏 a。读法竞争——chng→chang（静态漏字 11）与
@@ -1502,10 +1662,9 @@ void run_autocorrect_generated_space_tests(const std::filesystem::path &data_dir
     }
 
     // head+简拼尾组合路径的静态优先：shatngzh 在整串 k-best 上无解（尾部 zh 非
-    // 完整音节），走 head 重试。head shatng 的读法竞争——sha+tng→tang（静态漏字
-    // 11）与 shatng→shang（生成插入 15）。丢弃规则由 k-best 搜索自身执行，head
-    // 路径同享：静态读法的沙汤扎（sha'tang'zh 精确键）在场，上周（shang+zh 生成
-    // 读法经 costlier 档，表内输入的基线里不存在）不得出现。
+    // 完整音节），走 head 重试。head shatng 的读法是 sha+tng→tang（静态漏字 11）。
+    // 生成式插入已随本任务移除，shang 读法（旧生成插入 15）不再存在。静态读法的
+    // 沙汤扎（sha'tang'zh 精确键）在场，上周（shang+zh）不得出现。
     {
         metasequoia::InputSession session(SchemeType::Quanpin, both, true, true, true, paths);
         type(session, "shatngzh");
@@ -1525,6 +1684,95 @@ void run_autocorrect_generated_space_tests(const std::filesystem::path &data_dir
     }
 }
 
+// 纯简拼形输入（每个字母都是一个声母）如果词库里真有它的简拼整词，由字面整词领衔：
+// nbn/nqn/bqng 分别命中词库 jp 列的 能不能/女青年/并且能够，纠错读法（难/帮）只排在
+// 后面，仍可选、仍带纠错标记。预编辑按字面简拼切分，选前缀单字只消耗它自己的字母。
+// 漏了元音的 bng 即使有简拼整词「不能够」，「帮」也不能丢。shng 含双字母切分 sh，
+// 不是纯简拼，漏字纠错照旧。
+void run_autocorrect_pure_jianpin_guard_tests(const std::filesystem::path &data_directory)
+{
+    const std::filesystem::path directory = data_directory / "autocorrect-pure-jianpin";
+    std::filesystem::create_directories(directory);
+    {
+        Database database(directory / "msime.db");
+        database.execute("CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_s VALUES('shang','s','上',900);"
+                         "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_n VALUES('nan','n','难',900);"
+                         "INSERT INTO tbl_1_n VALUES('neng','n','能',800);"
+                         "CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_b VALUES('bang','b','帮',900);"
+                         "CREATE TABLE tbl_3_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_3_b VALUES('bu''neng''gou','bng','不能够',2000);"
+                         "CREATE TABLE tbl_3_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_3_n VALUES('neng''bu''neng','nbn','能不能',5000);"
+                         "INSERT INTO tbl_3_n VALUES('nv''qing''nian','nqn','女青年',3000);"
+                         "CREATE TABLE tbl_4_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_4_b VALUES('bing''qie''neng''gou','bqng','并且能够',4000);");
+    }
+
+    metasequoia::RuntimePaths paths;
+    paths.resources = directory;
+    paths.user_data = directory;
+    paths.cache = directory;
+    paths.dictionaries = directory;
+    const unsigned all = quanpin::kAutocorrectTransposition | quanpin::kAutocorrectNeighbor |
+                         quanpin::kAutocorrectDeletion | quanpin::kAutocorrectInsertion;
+
+    struct Case
+    {
+        const char *input;
+        const char *word;
+        const char *display;
+        const char *corrected;
+    };
+    for (const Case &test : {Case{"nbn", "能不能", "n'b'n", "难"}, Case{"nqn", "女青年", "n'q'n", "难"},
+                             Case{"bqng", "并且能够", "b'q'n'g", "帮"}, Case{"bng", "不能够", "b'n'g", "帮"}})
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, all, true, true, true, paths);
+        type(session, test.input);
+        require(!session.candidates().empty() && session.candidates().front().word == test.word &&
+                    session.candidates().front().corrected_from.empty(),
+                (std::string("A pure-jianpin whole word must lead, uncorrected: ") + test.input).c_str());
+        const auto corrected = find_candidate_index(session, test.corrected);
+        require(corrected < session.candidates().size() && session.candidates()[corrected].corrected_from == test.input,
+                (std::string("The corrected reading must stay behind the jianpin word: ") + test.input).c_str());
+        require(session.get_pinyin_segmentation_with_cases() == test.display,
+                (std::string("The preedit must follow the literal jianpin reading: ") + test.input + " -> " +
+                 session.get_pinyin_segmentation_with_cases())
+                    .c_str());
+    }
+
+    // 选纯简拼的前缀单字只消耗它自己的声母，后面的 bn 留着继续输入。
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, all, true, true, true, paths);
+        type(session, "nbn");
+        const auto committed = session.select_candidate(candidate_index(session, "能"));
+        require(committed.commit == "能" && session.has_composition() && session.preedit() == "bn",
+                "Selecting a jianpin prefix character must consume only its own initial.");
+    }
+
+    // 含双字母切分的输入不是纯简拼，漏字纠错照旧命中「上」并记下敲入的字母。
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, all, true, true, true, paths);
+        type(session, "shng");
+        const auto found = find_candidate_index(session, "上");
+        require(found < session.candidates().size() && session.candidates()[found].corrected_from == "shng",
+                "A non-pure-jianpin typo (shng) must still be corrected with the typed letters recorded.");
+    }
+
+    // 纠错关时逐位不变：纯简拼输入仍由字面简拼读法领衔，且无纠错标记。
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0u, true, true, true, paths);
+        type(session, "bqng");
+        require(!session.candidates().empty() && session.candidates().front().word == "并且能够" &&
+                    session.candidates().front().corrected_from.empty(),
+                "With autocorrection off a pure-jianpin reading must still lead, uncorrected.");
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
 void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
 {
     const std::filesystem::path directory = data_directory / "caret-prefix";
@@ -1541,6 +1789,9 @@ void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
                          "INSERT INTO tbl_1_s VALUES('shi','sh','是',100);");
         database.execute("CREATE TABLE tbl_1_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
                          "INSERT INTO tbl_1_j VALUES('jie','j','接',100);");
+        database.execute("CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+                         "INSERT INTO tbl_1_y VALUES('ya','y','呀',100);"
+                         "INSERT INTO tbl_1_y VALUES('ya','y','压',90);");
         database.execute("CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);"
                          "INSERT INTO wubi86 VALUES('aaaa','工',100);"
                          "INSERT INTO wubi86 VALUES('aaaa','或',50);");
@@ -1601,6 +1852,17 @@ void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
                     "The floored prefix must decode exactly like the typed prefix spelling");
         }
 
+        // 首单元内侧不是串首：向上取整到首单元末尾，与 caret 落在 ni 边界上解码相同。
+        for (const std::size_t caret : {std::size_t(1), std::size_t(2)})
+        {
+            session.set_caret(caret);
+            session.recompute_candidates();
+            require(session.prefix_end() == 3 && session.pending_suffix() == "hao'shi'jie",
+                    "A caret inside the first unit must round up to the end of that unit");
+            require(same_word_list(session, quanpin_words("ni")),
+                    "The rounded-up first unit must decode exactly like the typed spelling");
+        }
+
         session.set_caret(7);
         session.recompute_candidates();
         require(session.prefix_end() == 7 && session.pending_suffix() == "shi'jie",
@@ -1642,6 +1904,22 @@ void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
         require(same_word_list(session, full_words), "Unsetting the caret must restore the full-string decode");
     }
 
+    // 只有一个单元时首单元内侧向上取整就是整串：按整串解码而非空前缀，
+    // 候选窗不被 IsCaretPrefixEmpty 收起。
+    {
+        metasequoia::InputSession session(SchemeType::Quanpin, 0, true, true, false, paths);
+        type(session, "ya");
+        require(session.prefix_end() == 2 && !session.candidates().empty(),
+                "The unset 'ya' caret must decode the whole string");
+        const auto full_words = words_of(session);
+        session.set_caret(1);
+        session.recompute_candidates();
+        require(session.prefix_end() == 2 && session.pending_suffix().empty(),
+                "A caret inside the first unit must not be mistaken for the string head");
+        require(same_word_list(session, full_words) && same_word_list(session, quanpin_words("ya")),
+                "An intra-first-unit caret must decode exactly like the whole 'ya'");
+    }
+
     // pending_suffix 保留原始大小写：大写字母从光标处插入后原样留在后缀里。
     {
         metasequoia::InputSession session(SchemeType::Quanpin, 0, true, true, false, paths);
@@ -1677,7 +1955,7 @@ void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
     }
 
     // 双拼贪心配对（engine spec #187）：nihkb; → {0,2,4,6}、nihcb; → {0,2,3,5,6}，
-    // caret 落在段中间时同样 floor 到完整段边界。
+    // caret 落在段中间时同样 floor 到完整段边界；首单元内侧向上取整到首单元末尾。
     const auto shuangpin_words = [&](const std::string &typed) {
         metasequoia::InputSession other(SchemeType::Shuangpin, GetMicrosoftShuangpinProfile(), paths);
         type(other, typed);
@@ -1693,8 +1971,9 @@ void run_caret_prefix_session_tests(const std::filesystem::path &data_directory)
 
         session.set_caret(1);
         session.recompute_candidates();
-        require(session.candidates().empty() && session.prefix_end() == 0 && session.pending_suffix() == "nihkb;",
-                "A caret inside the first shuangpin unit must quantize to an empty prefix");
+        require(session.prefix_end() == 2 && session.pending_suffix() == "hkb;" &&
+                    same_word_list(session, shuangpin_words("ni")),
+                "A caret inside the first shuangpin unit must round up to the end of that unit");
 
         session.set_caret(3);
         session.recompute_candidates();
@@ -1996,6 +2275,11 @@ int run_test()
                     "A v-form umlaut syllable did not query its canonical dictionary key.");
         }
 
+        // The alias layer that folds a dropped final g (zhonguo -> zhong'guo,
+        // dongua -> dong'gua) is part of autocorrection and now follows its
+        // switch, so these cases run with the switch explicitly on. The default
+        // session has it off -- the mask=0 block right below pins that.
+        const unsigned alias_mask = quanpin::kAutocorrectTransposition;
         const std::array<UmlautAliasCase, 6> missing_final_g_cases = {{{"zhonguo", "中国"},
                                                                        {"zhon'guo", "中国"},
                                                                        {"zhongguo", "中国"},
@@ -2004,12 +2288,36 @@ int run_test()
                                                                        {"dongan", "东安"}}};
         for (const auto &test_case : missing_final_g_cases)
         {
-            metasequoia::InputSession corrected;
+            metasequoia::InputSession corrected(SchemeType::Quanpin, alias_mask);
             type(corrected, test_case.pinyin);
             require(candidate_index(corrected, test_case.candidate) == 0,
                     "A missing final g did not resolve to the complete dictionary phrase.");
             require(corrected.select_candidate(0).commit == test_case.candidate && !corrected.has_composition(),
                     "Selecting a corrected phrase left an unconsumed input suffix.");
+        }
+
+        // R2: with both switches off the engine must not correct at all. These
+        // inputs used to be rewritten by the always-on alias layer (sahng ->
+        // shang, zhonguo -> zhong'guo, laing -> liang, ahng -> hang, mihng ->
+        // ming); now the alias layer and the correction BFS both follow the
+        // mask, so nothing may come back marked as corrected.
+        for (const char *typo : {"sahng", "zhonguo", "laing", "ahng", "mihng"})
+        {
+            metasequoia::InputSession off_session(SchemeType::Quanpin, 0u);
+            type(off_session, typo);
+            require(std::none_of(off_session.candidates().begin(), off_session.candidates().end(),
+                                 [](const WordItem &item) { return !item.corrected_from.empty(); }),
+                    "With autocorrection off no candidate may be marked as corrected.");
+        }
+
+        // R2 exception: the non-typo ü normalization must still work with the
+        // switches off. The run_test fixture carries ju/qu/xu/yu (nue/lve live in
+        // run_umlaut_alias_session_tests, which also pins the mask=0 path).
+        {
+            metasequoia::InputSession umlaut_session(SchemeType::Quanpin, 0u);
+            type(umlaut_session, "jv");
+            require(candidate_index(umlaut_session, "居") == 0,
+                    "The ü normalization (jv -> ju) must stay active with autocorrection off.");
         }
 
         // PRD R5 regression: a fully legal spelling whose alias reading won the
@@ -2033,17 +2341,22 @@ int run_test()
                     "A legal spelling with an alias reading must preedit the typed letters.");
         }
 
-        // Inputs the guard does not cover fall back to the input as typed when
-        // the alias layer rewrote the letters: no phantom letter, and a manual
-        // delimiter the user typed stays in place.
-        const std::array<PreeditCase, 4> typed_fallback_preedit_cases = {
-            {{"dongua", "dongua"}, {"zhonguo", "zhonguo"}, {"haoyonga'", "haoyonga'"}, {"hao'yonga", "hao'yonga"}}};
+        // Inputs the guard does not cover: with autocorrection off the alias
+        // layer no longer rewrites the letters, so these preedit their literal
+        // (greedy) cut -- the typed letters with a separator at the greedy cut
+        // position, and never a phantom letter. (With correction on the same
+        // inputs fall back to the typed spelling; that path is covered by the
+        // mask-enabled display cases in test_pinyin.cpp.)
+        const std::array<PreeditCase, 4> typed_fallback_preedit_cases = {{{"dongua", "don'gua"},
+                                                                          {"zhonguo", "zhon'guo"},
+                                                                          {"haoyonga'", "hao'yong'a'"},
+                                                                          {"hao'yonga", "hao'yong'a"}}};
         for (const auto &test_case : typed_fallback_preedit_cases)
         {
             metasequoia::InputSession session;
             type(session, test_case.pinyin);
             require(session.get_pinyin_segmentation_with_cases() == test_case.expected_preedit,
-                    "An alias-rewritten input must preedit exactly what was typed.");
+                    "An uncorrected input must preedit its literal cut.");
         }
 
         metasequoia::InputSession no_autocorrect_session(SchemeType::Quanpin, 0u);
@@ -2519,8 +2832,10 @@ int run_test()
     run_autocorrect_selection_consumption_tests(data_directory);
     run_literal_segmentation_arbitration_tests(data_directory);
     run_autocorrect_costlier_context_tests(data_directory);
+    run_autocorrect_off_consistency_tests(data_directory);
 
     run_autocorrect_generated_space_tests(data_directory);
+    run_autocorrect_pure_jianpin_guard_tests(data_directory);
 #endif
 
 #ifndef METASEQUOIA_SKIP_FREQUENCY_TESTS
@@ -2707,108 +3022,100 @@ int run_test()
 #endif
 
 #ifndef METASEQUOIA_FREQUENCY_TESTS_ONLY
-    metasequoia::InputSession unicode_session(SchemeType::Quanpin);
-    require(unicode_session.handle_character('U', true).handled &&
-                unicode_session.local_input_mode() == metasequoia::LocalInputMode::Unicode &&
-                unicode_session.preedit() == "U" && unicode_session.candidates().empty(),
-            "Shift+U did not enter an empty Unicode composition.");
-    require(unicode_session.handle_character('g').handled && unicode_session.preedit() == "U" &&
-                unicode_session.candidates().empty(),
-            "Unicode mode accepted or forwarded a non-hexadecimal character.");
-    for (const char character : std::string("4e00"))
-    {
-        require(unicode_session.handle_character(character).handled, "Unicode mode rejected a hexadecimal character.");
-    }
-    require(unicode_session.preedit() == "U4e00" && unicode_session.candidates().size() == 1 &&
-                unicode_session.candidates().front().word == "一" &&
-                unicode_session.candidates().front().pinyin == "U+4E00" &&
-                unicode_session.candidates().front().source == CandidateSource::Generated,
-            "Unicode mode did not produce the Windows-compatible BMP candidate.");
-    const auto unicode_commit = unicode_session.select_candidate(0);
-    require(unicode_commit.handled && unicode_commit.commit == "一" && !unicode_session.has_composition() &&
-                unicode_session.local_input_mode() == metasequoia::LocalInputMode::None,
-            "Committing a Unicode candidate did not leave the local mode.");
+    // 拆字查表走数据目录下的 radical/decomposition.txt。写一份最小表，测试不依赖部署数据
+    // 目录里的真实表，字频只用来验证「同前缀内高频在前」。
+    const std::filesystem::path radical_directory = data_directory / "radical-fixture";
+    write_file(radical_directory / "radical" / "decomposition.txt", "# 部件拼音连写<Tab>汉字<Tab>字频\n"
+                                                                    "ririri\t晶\t106\n"
+                                                                    "ririri\t曑\t1\n"
+                                                                    "heng\t一\t18584\n"
+                                                                    "hengheng\t丁\t900\n");
+    set_data_directory(radical_directory);
 
+    metasequoia::InputSession radical_session(SchemeType::Quanpin);
+    require(radical_session.handle_character('U', true).handled &&
+                radical_session.local_input_mode() == metasequoia::LocalInputMode::Radical &&
+                radical_session.preedit() == "U" && radical_session.candidates().empty(),
+            "Shift+U did not enter an empty radical composition.");
+    // 非小写字母（数字）被吞：预编辑保持 "U"、候选不变，也不让给普通拼音。
+    require(radical_session.handle_character('4').handled && radical_session.preedit() == "U" &&
+                radical_session.candidates().empty(),
+            "Radical mode accepted or forwarded a non-lowercase-letter key.");
+    for (const char character : std::string("ririri"))
+    {
+        require(radical_session.handle_character(character).handled, "Radical mode rejected a lowercase letter.");
+    }
+    require(radical_session.preedit() == "Uririri" && !radical_session.candidates().empty() &&
+                radical_session.candidates().front().word == "晶" &&
+                radical_session.candidates().front().source == CandidateSource::Generated,
+            "Radical mode did not rank the highest-frequency decomposition of 晶 first.");
+    const auto radical_commit = radical_session.select_candidate(0);
+    require(radical_commit.handled && radical_commit.commit == "晶" && !radical_session.has_composition() &&
+                radical_session.local_input_mode() == metasequoia::LocalInputMode::None,
+            "Committing a radical candidate did not leave the local mode.");
+
+    // 前缀收窄：连写码 heng 的最高频命中是 一（18584，高于任何 heng* 的更长码）。
+    require(radical_session.handle_character('U', true).handled, "Radical mode could not be re-entered for prefixing.");
+    type(radical_session, "heng");
+    require(radical_session.preedit() == "Uheng" && !radical_session.candidates().empty() &&
+                radical_session.candidates().front().word == "一",
+            "A radical prefix did not return its highest-frequency character first.");
+    require(radical_session.handle_command(metasequoia::Command::Cancel).handled &&
+                radical_session.local_input_mode() == metasequoia::LocalInputMode::None,
+            "Cancel did not leave radical mode.");
+
+    // 大写字母与预编辑里的其它按键都被吞、预编辑不变（沿用「非法字符被吞」的语义）。
+    require(radical_session.handle_character('U', true).handled,
+            "Radical mode could not be re-entered for illegal-key coverage.");
+    require(radical_session.handle_character('A').handled && radical_session.handle_character('9').handled &&
+                radical_session.preedit() == "U" && radical_session.candidates().empty(),
+            "Radical mode leaked an uppercase letter or digit into the preedit.");
     // Segment boundaries are the engine's unit model: quanpin reports one offset
     // per displayed syllable, and a local mode reports none so the host keeps
     // single-character editing (PRD R4).
+    require(radical_session.segment_raw_boundaries().empty(), "A local mode must report no pinyin segment boundaries.");
+    require(radical_session.handle_command(metasequoia::Command::Cancel).handled,
+            "Cancel did not leave radical mode after the boundary check.");
+
+    metasequoia::InputSession boundary_session(SchemeType::Quanpin);
+    for (const char character : std::string("nihaoma"))
     {
-        require(unicode_session.handle_character('U', true).handled,
-                "Unicode mode could not be re-entered for the boundary check.");
-        require(unicode_session.segment_raw_boundaries().empty(),
-                "A local mode must report no pinyin segment boundaries.");
-        require(unicode_session.handle_command(metasequoia::Command::Cancel).handled,
-                "Cancel did not leave Unicode mode after the boundary check.");
-
-        metasequoia::InputSession boundary_session(SchemeType::Quanpin);
-        for (const char character : std::string("nihaoma"))
-        {
-            require(boundary_session.handle_character(character).handled, "Quanpin rejected a letter.");
-        }
-        require(boundary_session.segment_raw_boundaries() == std::vector<std::size_t>({0, 2, 5, 7}),
-                "Quanpin unit boundaries did not follow the displayed syllables.");
+        require(boundary_session.handle_character(character).handled, "Quanpin rejected a letter.");
     }
+    require(boundary_session.segment_raw_boundaries() == std::vector<std::size_t>({0, 2, 5, 7}),
+            "Quanpin unit boundaries did not follow the displayed syllables.");
 
-    require(unicode_session.handle_character('U', true).handled && unicode_session.handle_character('+').handled,
-            "Unicode mode rejected its optional plus prefix.");
-    for (const char character : std::string("1f600"))
-    {
-        require(unicode_session.handle_character(character).handled,
-                "Unicode mode rejected a supplementary-plane hexadecimal character.");
-    }
-    require(unicode_session.preedit() == "U+1f600" && unicode_session.candidates().size() == 1 &&
-                unicode_session.candidates().front().word == "😀",
-            "Unicode mode did not produce a supplementary-plane scalar.");
-    require(unicode_session.handle_command(metasequoia::Command::Cancel).handled && !unicode_session.has_composition(),
-            "Cancel did not leave Unicode mode.");
-
-    const auto require_invalid_unicode = [&](const std::string &hex) {
-        require(unicode_session.handle_character('U', true).handled,
-                "Unicode mode could not be re-entered for invalid-scalar coverage.");
-        for (const char character : hex)
-        {
-            require(unicode_session.handle_character(character).handled,
-                    "Unicode mode rejected an invalid scalar's hexadecimal spelling.");
-        }
-        require(unicode_session.candidates().empty(), "Unicode mode produced an invalid scalar candidate.");
-        require(unicode_session.handle_command(metasequoia::Command::Cancel).handled,
-                "Unicode invalid-scalar fixture could not be cancelled.");
-    };
-    require_invalid_unicode("d800");
-    require_invalid_unicode("110000");
-    require_invalid_unicode("0000001");
-
-    require(unicode_session.handle_character('U', true).handled,
-            "Unicode prefix was not handled before Backspace coverage.");
-    require(unicode_session.handle_command(metasequoia::Command::Backspace).handled &&
-                !unicode_session.has_composition() &&
-                unicode_session.local_input_mode() == metasequoia::LocalInputMode::None,
-            "Backspace on a bare Unicode prefix did not leave the mode.");
+    require(radical_session.handle_character('U', true).handled,
+            "Radical prefix was not handled before Backspace coverage.");
+    require(radical_session.handle_command(metasequoia::Command::Backspace).handled &&
+                !radical_session.has_composition() &&
+                radical_session.local_input_mode() == metasequoia::LocalInputMode::None,
+            "Backspace on a bare radical prefix did not leave the mode.");
 
     metasequoia::InputSession plain_uppercase(SchemeType::Quanpin);
     require(!plain_uppercase.handle_character('U').handled && !plain_uppercase.has_composition() &&
                 plain_uppercase.local_input_mode() == metasequoia::LocalInputMode::None,
             "An uppercase character without Shift-only was swallowed.");
     metasequoia::LocalModeOptions disabled_local_modes;
-    disabled_local_modes.unicode = false;
-    metasequoia::InputSession disabled_unicode(SchemeType::Quanpin);
-    disabled_unicode.set_local_mode_options(disabled_local_modes);
-    require(!disabled_unicode.handle_character('U', true).handled && !disabled_unicode.has_composition() &&
-                disabled_unicode.local_input_mode() == metasequoia::LocalInputMode::None,
-            "A disabled Unicode shortcut swallowed Shift+U.");
+    disabled_local_modes.radical = false;
+    metasequoia::InputSession disabled_radical(SchemeType::Quanpin);
+    disabled_radical.set_local_mode_options(disabled_local_modes);
+    require(!disabled_radical.handle_character('U', true).handled && !disabled_radical.has_composition() &&
+                disabled_radical.local_input_mode() == metasequoia::LocalInputMode::None,
+            "A disabled radical shortcut swallowed Shift+U.");
 
-    metasequoia::InputSession wubi_unicode(SchemeType::Wubi);
-    require(!wubi_unicode.handle_character('U', true).handled && !wubi_unicode.has_composition() &&
-                wubi_unicode.local_input_mode() == metasequoia::LocalInputMode::None,
+    metasequoia::InputSession wubi_radical(SchemeType::Wubi);
+    require(!wubi_radical.handle_character('U', true).handled && !wubi_radical.has_composition() &&
+                wubi_radical.local_input_mode() == metasequoia::LocalInputMode::None,
             "Shift+U was swallowed outside a pinyin scheme.");
-    metasequoia::InputSession switch_clears_unicode(SchemeType::Shuangpin);
-    require(switch_clears_unicode.handle_character('U', true).handled &&
-                switch_clears_unicode.local_input_mode() == metasequoia::LocalInputMode::Unicode,
-            "Shuangpin could not enter Unicode mode.");
-    switch_clears_unicode.switch_scheme(SchemeType::Quanpin);
-    require(!switch_clears_unicode.has_composition() &&
-                switch_clears_unicode.local_input_mode() == metasequoia::LocalInputMode::None,
-            "Switching schemes did not clear Unicode mode.");
+    metasequoia::InputSession switch_clears_radical(SchemeType::Shuangpin);
+    require(switch_clears_radical.handle_character('U', true).handled &&
+                switch_clears_radical.local_input_mode() == metasequoia::LocalInputMode::Radical,
+            "Shuangpin could not enter radical mode.");
+    switch_clears_radical.switch_scheme(SchemeType::Quanpin);
+    require(!switch_clears_radical.has_composition() &&
+                switch_clears_radical.local_input_mode() == metasequoia::LocalInputMode::None,
+            "Switching schemes did not clear radical mode.");
 
     metasequoia::InputSession date_time_session(SchemeType::Quanpin);
     date_time_session.set_local_date_time_provider(
@@ -2896,6 +3203,71 @@ int run_test()
     require(!wubi_date_time.handle_character('T', true).handled && !wubi_date_time.has_composition() &&
                 wubi_date_time.local_input_mode() == metasequoia::LocalInputMode::None,
             "Shift+T was swallowed outside a pinyin scheme.");
+
+    // 五笔保留原样串：Server 端的 T/V 形状判定（大写 T 前缀、V＋数字）读的是宿主回读的原样串，
+    // 而五笔码表查询和自动上屏用的是归一后的码。宿主把 T/V 模式的串标成字面输入，原样串才
+    // 留全用户敲的字符；普通码的原样串就是带大小写的码，与查询码逐位对应、一起截断。
+    const std::filesystem::path wubi_raw_directory = data_directory / "wubi-raw";
+    std::filesystem::create_directories(wubi_raw_directory);
+    {
+        Database database(wubi_raw_directory / "msime.db");
+        database.execute("CREATE TABLE wubi86(key TEXT, value TEXT, weight INTEGER)");
+    }
+    set_data_directory(wubi_raw_directory);
+    for (const bool mixed_pinyin : {false, true})
+    {
+        metasequoia::WubiInputOptions wubi_options;
+        wubi_options.mixed_pinyin = mixed_pinyin;
+
+        metasequoia::InputSession v_mode_wubi(SchemeType::Wubi);
+        v_mode_wubi.set_wubi_input_options(wubi_options);
+        v_mode_wubi.set_pinyin_sequence("V1+2");
+        v_mode_wubi.set_pinyin_sequence_with_cases("V1+2");
+        v_mode_wubi.set_wubi_literal_input(true);
+        v_mode_wubi.recompute_candidates();
+        require(v_mode_wubi.get_pinyin_sequence_with_cases() == "V1+2" && v_mode_wubi.get_pinyin_sequence() == "v",
+                "Wubi did not keep the raw-case V-mode prefix apart from the query code.");
+
+        // 不标字面输入时同一串就是普通码：数字不是码字，回读里也不能有。
+        metasequoia::InputSession v_code_wubi(SchemeType::Wubi);
+        v_code_wubi.set_wubi_input_options(wubi_options);
+        v_code_wubi.set_pinyin_sequence("V1+2");
+        v_code_wubi.set_pinyin_sequence_with_cases("V1+2");
+        v_code_wubi.recompute_candidates();
+        require(v_code_wubi.get_pinyin_sequence_with_cases() == "V" && v_code_wubi.get_pinyin_sequence() == "v",
+                "A wubi code kept characters that are not code letters in its raw-case string.");
+
+        metasequoia::InputSession t_mode_wubi(SchemeType::Wubi);
+        t_mode_wubi.set_wubi_input_options(wubi_options);
+        t_mode_wubi.set_pinyin_sequence("T2024/12/25");
+        t_mode_wubi.set_pinyin_sequence_with_cases("T2024/12/25");
+        t_mode_wubi.set_wubi_literal_input(true);
+        t_mode_wubi.recompute_candidates();
+        require(t_mode_wubi.get_pinyin_sequence_with_cases() == "T2024/12/25" &&
+                    t_mode_wubi.get_pinyin_sequence() == "t" && t_mode_wubi.preedit() == "t",
+                "Wubi did not keep the raw-case date/time prefix apart from the query code.");
+
+        // 反向保护：普通小写码字两个 getter 逐字节相同，预编辑也照旧。
+        metasequoia::InputSession plain_wubi(SchemeType::Wubi);
+        plain_wubi.set_wubi_input_options(wubi_options);
+        plain_wubi.set_pinyin_sequence("wqaa");
+        plain_wubi.set_pinyin_sequence_with_cases("wqaa");
+        plain_wubi.recompute_candidates();
+        require(plain_wubi.get_pinyin_sequence_with_cases() == "wqaa" && plain_wubi.get_pinyin_sequence() == "wqaa" &&
+                    plain_wubi.preedit() == "wqaa",
+                "A plain wubi code no longer round-trips unchanged.");
+
+        // z 不是码字时（混输与通配都关）必须从原样串里也丢掉：Server 按原样串长度数四码，
+        // 留着它会比码多一格，顶字提前一个键触发。混输开启时 z 是合法码字，照旧保留。
+        metasequoia::InputSession z_wubi(SchemeType::Wubi);
+        z_wubi.set_wubi_input_options(wubi_options);
+        z_wubi.set_pinyin_sequence("wqaz");
+        z_wubi.set_pinyin_sequence_with_cases("wqaz");
+        z_wubi.recompute_candidates();
+        require(z_wubi.get_pinyin_sequence_with_cases() == (mixed_pinyin ? "wqaz" : "wqa") &&
+                    z_wubi.get_pinyin_sequence() == (mixed_pinyin ? "wqaz" : "wqa"),
+                "A dropped wubi z did not stay dropped in the raw-case string.");
+    }
 
     const std::filesystem::path quick_phrase_directory = data_directory / "quick-phrase";
     std::filesystem::create_directories(quick_phrase_directory);

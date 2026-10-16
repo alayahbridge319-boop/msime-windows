@@ -71,7 +71,8 @@ int main(int argc, char **argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: eval_quanpin_sentence <cases.tsv> [repeats] [lattice] [fuzzy=<rules>]\n");
+        std::fprintf(stderr, "usage: eval_quanpin_sentence <cases.tsv> [repeats] [lattice] [octagram] "
+                             "[weight=<w>] [model=<path>] [fuzzy=<rules>]\n");
         return 2;
     }
     const auto cases = load_cases(argv[1]);
@@ -79,21 +80,63 @@ int main(int argc, char **argv)
 
     // 与出厂默认一致：词格整句 + 神经速度档 + 万象搭配加分（模型在数据目录里时）。
     // 第 3 个参数写 lattice 时只开词格，用来把神经重排的耗时单独拆出来。
+    // 写 octagram 时关掉词格/神经整句行，只留〔万象〕一条（复现用户实际配置的显示行）。
+    // weight=<w> 覆盖 collocation_weight（默认 1.0），便于权重扫描。
+    // model=<path> 覆盖 .gram 路径；不写时先看 METASEQUOIA_IME_TEST_COLLOCATION_MODEL，
+    // 再看数据目录的 models/zh-moqi/zh-moqi.gram。
     // 任意位置写 fuzzy=<规则位>（如 fuzzy=0x7ff）时带模糊音跑，看合法输入的首选有没有被模糊读音抢走。
     bool lattice_only = false;
+    bool octagram_only = false;
+    double collocation_weight_override = -1.0;
+    std::string model_override;
     metasequoia::FuzzyPinyinOptions fuzzy;
     for (int i = 3; i < argc; ++i)
     {
         const std::string arg = argv[i];
         if (arg == "lattice")
             lattice_only = true;
+        else if (arg == "octagram")
+            octagram_only = true;
+        else if (arg.rfind("weight=", 0) == 0)
+            collocation_weight_override = std::strtod(arg.c_str() + 7, nullptr);
+        else if (arg.rfind("model=", 0) == 0)
+            model_override = arg.substr(6);
         else if (arg.rfind("fuzzy=", 0) == 0)
             fuzzy.rules = static_cast<std::uint32_t>(std::strtoul(arg.c_str() + 6, nullptr, 0));
     }
     SentenceAssociationOptions options;
-    options.word_lattice = true;
-    options.neural_keyboard = !lattice_only;
-    const auto collocation = metasequoia::data_directory() / "models" / "zh-moqi" / "zh-moqi.gram";
+    options.word_lattice = !octagram_only;
+    options.neural_keyboard = !lattice_only && !octagram_only;
+    options.collocation_rerank = octagram_only;
+    if (collocation_weight_override >= 0.0)
+        options.collocation_weight = collocation_weight_override;
+    // 六参数默认取 GrammarConfig（万象现行）；METASEQUOIA_IME_COLLOCATION_GRAMMAR 用
+    // "max,min,coll,non,weak,rear" 覆盖，便于在真实模型上扫参数而不用改代码。
+    if (const char *grammar = std::getenv("METASEQUOIA_IME_COLLOCATION_GRAMMAR"))
+    {
+        std::istringstream fields(grammar);
+        std::string field;
+        double values[6] = {0, 0, 0, 0, 0, 0};
+        int index = 0;
+        while (index < 6 && std::getline(fields, field, ','))
+            values[index++] = std::strtod(field.c_str(), nullptr);
+        if (index == 6)
+        {
+            options.collocation_grammar.collocation_max_length = static_cast<int>(values[0]);
+            options.collocation_grammar.collocation_min_length = static_cast<int>(values[1]);
+            options.collocation_grammar.collocation_penalty = values[2];
+            options.collocation_grammar.non_collocation_penalty = values[3];
+            options.collocation_grammar.weak_collocation_penalty = values[4];
+            options.collocation_grammar.rear_penalty = values[5];
+        }
+    }
+    std::filesystem::path collocation;
+    if (!model_override.empty())
+        collocation = model_override;
+    else if (const char *env_model = std::getenv("METASEQUOIA_IME_TEST_COLLOCATION_MODEL"))
+        collocation = env_model;
+    else
+        collocation = metasequoia::data_directory() / "models" / "zh-moqi" / "zh-moqi.gram";
     if (std::filesystem::exists(collocation))
         options.collocation_model = metasequoia::path_to_utf8(collocation);
 

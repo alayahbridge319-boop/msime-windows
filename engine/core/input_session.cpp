@@ -8,7 +8,6 @@
 #include "../local_modes/jianpin_query.h"
 #include "../local_modes/kaomoji_query.h"
 #include "../local_modes/quick_phrase_query.h"
-#include "../local_modes/unicode_query.h"
 #include "../quanpin/quanpin_query.h"
 #include "../quanpin/quanpin_utils.h"
 #include "../shuangpin/shuangpin_query.h"
@@ -97,10 +96,10 @@ KeyResult InputSession::handle_character(char character, bool shift_only)
         return handle_local_character(character);
     }
 
-    if (shift_only && character == 'U' && local_mode_options_.unicode && !has_composition() &&
+    if (shift_only && character == 'U' && local_mode_options_.radical && !has_composition() &&
         (scheme() == SchemeType::Quanpin || scheme() == SchemeType::Shuangpin))
     {
-        local_input_mode_ = LocalInputMode::Unicode;
+        local_input_mode_ = LocalInputMode::Radical;
         local_preedit_ = "U";
         local_candidates_.clear();
         return {true, std::nullopt, std::nullopt};
@@ -550,7 +549,7 @@ void InputSession::set_local_mode_options(LocalModeOptions options)
     {
         update_mixed_candidates();
     }
-    if ((local_input_mode_ == LocalInputMode::Unicode && !local_mode_options_.unicode) ||
+    if ((local_input_mode_ == LocalInputMode::Radical && !local_mode_options_.radical) ||
         (local_input_mode_ == LocalInputMode::DateTime && !local_mode_options_.date_time) ||
         (local_input_mode_ == LocalInputMode::QuickPhrase && !local_mode_options_.quick_phrase) ||
         (local_input_mode_ == LocalInputMode::Emoji && !local_mode_options_.emoji) ||
@@ -913,7 +912,8 @@ KeyResult InputSession::handle_local_character(char character)
         local_preedit_.push_back(character);
         return {true, std::nullopt, update_local_candidates()};
     }
-    if (local_input_mode_ == LocalInputMode::QuickPhrase)
+    // 快捷短语码与 U 模式的部件拼音连写都只收小写 a-z：其它键吞掉、预编辑不变。
+    if (local_input_mode_ == LocalInputMode::QuickPhrase || local_input_mode_ == LocalInputMode::Radical)
     {
         if (character < 'a' || character > 'z')
         {
@@ -937,19 +937,7 @@ KeyResult InputSession::handle_local_character(char character)
         local_preedit_.push_back(character);
         return {true, std::nullopt, update_local_candidates()};
     }
-    if (local_input_mode_ != LocalInputMode::Unicode)
-    {
-        return {};
-    }
-
-    const auto unsigned_character = static_cast<unsigned char>(character);
-    const bool optional_plus = character == '+' && local_preedit_ == "U";
-    if (!optional_plus && std::isxdigit(unsigned_character) == 0)
-    {
-        return {true, std::nullopt, std::nullopt};
-    }
-    local_preedit_.push_back(character);
-    return {true, std::nullopt, update_local_candidates()};
+    return {};
 }
 
 std::optional<std::string> InputSession::update_local_candidates()
@@ -1102,7 +1090,17 @@ std::size_t InputSession::quantized_prefix_end() const
     // Floor to the last complete unit at or before the caret: an incomplete trailing unit
     // belongs to the pending suffix. boundaries always contains 0, so the boundary before
     // upper_bound always exists.
-    return *std::prev(std::upper_bound(boundaries.begin(), boundaries.end(), caret_position()));
+    const auto next = std::upper_bound(boundaries.begin(), boundaries.end(), caret_position());
+    const std::size_t floored = *std::prev(next);
+    // A floor of 0 with the caret past the string head means the caret sits inside the FIRST
+    // unit, not at the true head. Round up to the end of that unit instead (the whole string
+    // when it is the only unit): prefix_end == 0 is reserved for caret == 0, which the host
+    // reads as an empty prefix and hides the candidate window for (IsCaretPrefixEmpty).
+    if (floored == 0 && caret_position() > 0)
+    {
+        return next != boundaries.end() ? *next : raw.size();
+    }
+    return floored;
 }
 
 std::size_t InputSession::prefix_end() const
@@ -1148,8 +1146,9 @@ void InputSession::refresh_prefix_candidates()
         prefix_candidates_ = engine_.query_raw_candidates(prefix, raw_with_cases.substr(0, end));
         prefix_query_input_ = prefix;
     }
-    // An empty prefix (caret at/before the first boundary) decodes to no candidates on purpose:
-    // the host hides its candidate window while the preedit keeps showing the full pinyin.
+    // An empty prefix (caret == 0; a caret inside the first unit rounds up to its end instead)
+    // decodes to no candidates on purpose: the host hides its candidate window while the
+    // preedit keeps showing the full pinyin.
     prefix_candidates_active_ = true;
 }
 

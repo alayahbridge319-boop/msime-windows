@@ -59,7 +59,9 @@ class ImeSession
     }
     void replace_shuangpin_raw_input(const std::string &raw_input, const std::string &raw_input_with_cases);
     void replace_quanpin_raw_input(const std::string &raw_input, const std::string &raw_input_with_cases);
-    void replace_wubi_raw_input(const std::string &raw_input, const std::string &raw_input_with_cases);
+    // literal_input: see WubiScheme::set_literal_input.
+    void replace_wubi_raw_input(const std::string &raw_input, const std::string &raw_input_with_cases,
+                                bool literal_input = false);
     void replace_japanese_raw_input(const std::string &raw_input, const std::string &raw_input_with_cases);
     // Writes back to whichever scheme is composing. Committing a pinyin answer out of a longer
     // mixed composition has to shorten the live composition, and the pinyin-shaped caller would
@@ -116,6 +118,11 @@ class ImeSession
     void bind_shuangpin_scheme();
     // 把会话的直接辅助码、大写触发设置下发给双拼方案（非双拼方案什么也不做）。
     void configure_shuangpin_scheme(IInputScheme *scheme) const;
+    // 把会话的纠错掩码下发给全拼方案（非全拼方案什么也不做）。要在 build_request 之前调，
+    // 掩码决定切分要不要跑手误别名层。
+    void configure_quanpin_scheme(IInputScheme *scheme) const;
+    // 换方案或改纠错开关时把掩码绑到当前方案上，和 bind_shuangpin_scheme 同一模式。
+    void bind_quanpin_scheme();
     std::unique_ptr<IInputScheme> create_scheme(SchemeType scheme_type) const;
 
   private:

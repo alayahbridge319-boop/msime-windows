@@ -30,6 +30,11 @@ target_include_directories(test_caps_lock_punctuation_policy PRIVATE ../src)
 target_compile_features(test_caps_lock_punctuation_policy PRIVATE cxx_std_17)
 add_test(NAME caps_lock_punctuation_policy COMMAND test_caps_lock_punctuation_policy)
 
+add_executable(test_caps_lock_input_policy caps_lock_input_policy.cpp)
+target_include_directories(test_caps_lock_input_policy PRIVATE ../src)
+target_compile_features(test_caps_lock_input_policy PRIVATE cxx_std_17)
+add_test(NAME caps_lock_input_policy COMMAND test_caps_lock_input_policy)
+
 add_executable(test_commit_candidate_and_continue_payload commit_candidate_and_continue_payload.cpp)
 target_include_directories(test_commit_candidate_and_continue_payload PRIVATE ../src)
 target_compile_features(test_commit_candidate_and_continue_payload PRIVATE cxx_std_17)
@@ -39,6 +44,11 @@ add_executable(test_punctuation_commit_text punctuation_commit_text.cpp)
 target_include_directories(test_punctuation_commit_text PRIVATE ../src)
 target_compile_features(test_punctuation_commit_text PRIVATE cxx_std_17)
 add_test(NAME punctuation_commit_text COMMAND test_punctuation_commit_text)
+
+add_executable(test_input_state_shortcuts input_state_shortcuts.cpp)
+target_compile_features(test_input_state_shortcuts PRIVATE cxx_std_17)
+target_compile_definitions(test_input_state_shortcuts PRIVATE MSIME_SHORTCUT_FIXTURE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../engine/contracts/tests/input_state_shortcuts.json")
+add_test(NAME input_state_shortcuts COMMAND test_input_state_shortcuts)
 
 # The classifier and the event queue are compiled into this target directly:
 # they must stay free of TSF and DLL lifecycle dependencies.
@@ -66,3 +76,22 @@ add_executable(test_focus_announcement_policy focus_announcement_policy.cpp)
 target_include_directories(test_focus_announcement_policy PRIVATE ../src)
 target_compile_features(test_focus_announcement_policy PRIVATE cxx_std_17)
 add_test(NAME focus_announcement_policy COMMAND test_focus_announcement_policy)
+
+# Exercise the production reconnect sequencing without loading a TIP into a host.
+# Regenerate the fixture when either handler changes, so a missing recovery step
+# cannot be hidden by a copied implementation in the test.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(reconnect_window_source "${CMAKE_CURRENT_SOURCE_DIR}/../src/IME/MetasequoiaIME_WindowProc.cpp")
+set(reconnect_key_source "${CMAKE_CURRENT_SOURCE_DIR}/../src/Key/KeyEventSink_DeferredKeys.cpp")
+set(reconnect_fixture_generator "${CMAKE_CURRENT_SOURCE_DIR}/generate_reconnect_fixture.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${reconnect_window_source}" "${reconnect_key_source}" "${reconnect_fixture_generator}")
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${reconnect_fixture_generator}"
+        "${reconnect_window_source}" "${reconnect_key_source}"
+        "${CMAKE_CURRENT_BINARY_DIR}/reconnect_recovery_source.h"
+    COMMAND_ERROR_IS_FATAL ANY)
+add_executable(test_reconnect_recovery reconnect_recovery.cpp)
+target_include_directories(test_reconnect_recovery PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_features(test_reconnect_recovery PRIVATE cxx_std_17)
+add_test(NAME reconnect_recovery COMMAND test_reconnect_recovery)

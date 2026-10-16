@@ -8,6 +8,7 @@ add_test(NAME voice_control_dispatch COMMAND test_voice_control_dispatch)
 
 set(TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/benchmark_model_path.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_date_time_query.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_v_mode_query.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_emoji_query.cpp"
@@ -29,6 +30,9 @@ set(TEST_SOURCE_FILES
     "${CMAKE_SOURCE_DIR}/src/cloud/translation_gloss.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_custom_translation.cpp"
     "${CMAKE_SOURCE_DIR}/src/cloud/custom_translation.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ai_translation.cpp"
+    "${CMAKE_SOURCE_DIR}/src/cloud/ai_translation.cpp"
+    "${CMAKE_SOURCE_DIR}/src/ai/chat_completions.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_niutrans_translation.cpp"
     "${CMAKE_SOURCE_DIR}/src/cloud/niutrans_translation.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_active_client_state.cpp"
@@ -87,6 +91,7 @@ set(TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_candidate_skin_catalog_colors.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_candidate_skin_catalog_images.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_candidate_skin_catalog_page_arrows.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_candidate_skin_catalog_supports.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_candidate_skin_palette.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_non_ascii_path_contract.cpp"
     "${CMAKE_SOURCE_DIR}/src/skin/candidate_skin_catalog.cpp"
@@ -123,9 +128,12 @@ set(TEST_SOURCE_FILES
     "${CMAKE_SOURCE_DIR}/src/config/ime_config_write.cpp"
     "${CMAKE_SOURCE_DIR}/src/session/engine_input_session.cpp"
     "${CMAKE_SOURCE_DIR}/src/utils/common_utils.cpp"
+    "${CMAKE_SOURCE_DIR}/src/utils/hanzi_pinyin.cpp"
     "${CMAKE_SOURCE_DIR}/src/utils/ime_paths.cpp"
     "${CMAKE_SOURCE_DIR}/src/utils/network_proxy.cpp"
     "${CMAKE_SOURCE_DIR}/src/settings/dictionary_validation.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_settings_mouse_input.cpp"
+    "${CMAKE_SOURCE_DIR}/src/settings/settings_mouse_input.cpp"
     # The catalog/download/delete behaviors under test live in collocation_model.cpp, so the
     # activation-fallback and id-guard cases link the real translation unit.
     "${CMAKE_SOURCE_DIR}/src/settings/collocation_model.cpp"
@@ -143,6 +151,8 @@ target_include_directories(${TEST_EXECUTABLE_NAME}
     "${CMAKE_SOURCE_DIR}/src"
     "${MSIME_VENDOR_DIR}"
     "${MSIME_ENGINE_DIR}/utfcpp/source"
+    # settings_mouse_input.h only needs the WebView2 enum declarations.
+    "${WEBVIEW2_VCPKG_ROOT}/include"
 )
 
 # test_default_config_credentials reads the config the installer actually ships, so the check is

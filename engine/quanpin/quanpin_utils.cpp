@@ -50,6 +50,25 @@ unsigned literal_mixed_pinyin_match(const std::string &raw, const std::string &c
     return full && initial ? (tail.empty() ? 1u : 2u) : 0u;
 }
 
+bool literal_jianpin_pinyin_match(const std::string &raw, const std::string &code, const std::string &canonical)
+{
+    if (raw.find('\'') != std::string::npos || canonical.empty())
+        return false;
+    const auto typed = split_segments(code);
+    const auto reading = split_segments(canonical);
+    if (typed.size() < 2 || typed.size() != reading.size())
+        return false;
+    std::string letters;
+    for (size_t i = 0; i < typed.size(); ++i)
+    {
+        if (typed[i].size() != 1 || !prefix_pinyin_set().count(typed[i]) || intact_pinyin_set().count(typed[i]) ||
+            !intact_pinyin_set().count(reading[i]) || reading[i][0] != typed[i][0])
+            return false;
+        letters += typed[i];
+    }
+    return letters == raw;
+}
+
 namespace
 {
 struct SparsePinyinFallbackEntry
@@ -119,42 +138,42 @@ const std::vector<SparsePinyinFallbackRule> &sparse_pinyin_fallback_rules()
 const std::vector<std::string> &intact_pinyin_list()
 {
     static const std::vector<std::string> kList = {
-        "a",     "ai",     "an",    "ang",   "ao",    "ba",    "bai",   "ban",   "bang",  "bao",    "bei",   "ben",
-        "beng",  "bi",     "bian",  "biang", "biao",  "bie",   "bin",   "bing",  "bo",    "bu",     "ca",    "cai",
-        "can",   "cang",   "cao",   "ce",    "cen",   "ceng",  "cha",   "chai",  "chan",  "chang",  "chao",  "che",
-        "chen",  "cheng",  "chi",   "chong", "chou",  "chu",   "chua",  "chuai", "chuan", "chuang", "chui",  "chun",
-        "chuo",  "ci",     "cong",  "cou",   "cu",    "cuan",  "cui",   "cun",   "cuo",   "da",     "dai",   "dan",
-        "dang",  "dao",    "de",    "dei",   "den",   "deng",  "di",    "dia",   "dian",  "diao",   "die",   "ding",
-        "diu",   "dong",   "dou",   "du",    "duan",  "dui",   "dun",   "duo",   "e",     "ei",     "en",    "er",
-        "fa",    "fan",    "fang",  "fei",   "fen",   "feng",  "fiao",  "fo",    "fou",   "fu",     "ga",    "gai",
-        "gan",   "gang",   "gao",   "ge",    "gei",   "gen",   "geng",  "gong",  "gou",   "gu",     "gua",   "guai",
-        "guan",  "guang",  "gui",   "gun",   "guo",   "ha",    "hai",   "han",   "hang",  "hao",    "he",    "hei",
-        "hen",   "heng",   "hong",  "hou",   "hu",    "hua",   "huai",  "huan",  "huang", "hui",    "hun",   "huo",
-        "ji",    "jia",    "jian",  "jiang", "jiao",  "jie",   "jin",   "jing",  "jiong", "jiu",    "ju",    "juan",
-        "jue",   "jun",    "jv",    "jve",   "ka",    "kai",   "kan",   "kang",  "kao",   "ke",     "kei",   "ken",
-        "keng",  "kong",   "kou",   "ku",    "kua",   "kuai",  "kuan",  "kuang", "kui",   "kun",    "kuo",   "la",
-        "lai",   "lan",    "lang",  "lao",   "le",    "lei",   "leng",  "li",    "lia",   "lian",   "liang", "liao",
-        "lie",   "lin",    "ling",  "liu",   "lo",    "long",  "lou",   "lu",    "luan",  "lue",    "lun",   "luo",
-        "lv",    "lve",    "ma",    "mai",   "man",   "mang",  "mao",   "me",    "mei",   "men",    "meng",  "mi",
-        "mian",  "miao",   "mie",   "min",   "ming",  "miu",   "mo",    "mou",   "mu",    "na",     "nai",   "nan",
-        "nang",  "nao",    "ne",    "nei",   "nen",   "neng",  "ni",    "nian",  "niang", "niao",   "nie",   "nin",
-        "ning",  "niu",    "nong",  "nou",   "nu",    "nuan",  "nue",   "nun",   "nuo",   "nv",     "nve",   "o",
-        "ou",    "pa",     "pai",   "pan",   "pang",  "pao",   "pei",   "pen",   "peng",  "pi",     "pian",  "piao",
-        "pie",   "pin",    "ping",  "po",    "pou",   "pu",    "qi",    "qia",   "qian",  "qiang",  "qiao",  "qie",
-        "qin",   "qing",   "qiong", "qiu",   "qu",    "quan",  "que",   "qun",   "qv",    "qve",    "ran",   "rang",
-        "rao",   "re",     "ren",   "reng",  "ri",    "rong",  "rou",   "ru",    "ruan",  "rui",    "run",   "ruo",
-        "sa",    "sai",    "san",   "sang",  "sao",   "se",    "sen",   "seng",  "sha",   "shai",   "shan",  "shang",
-        "shao",  "she",    "shei",  "shen",  "sheng", "shi",   "shou",  "shu",   "shua",  "shuai",  "shuan", "shuang",
-        "shui",  "shun",   "shuo",  "si",    "song",  "sou",   "su",    "suan",  "sui",   "sun",    "suo",   "ta",
-        "tai",   "tan",    "tang",  "tao",   "te",    "teng",  "ti",    "tian",  "tiao",  "tie",    "ting",  "tong",
-        "tou",   "tu",     "tuan",  "tui",   "tun",   "tuo",   "wa",    "wai",   "wan",   "wang",   "wei",   "wen",
-        "weng",  "wo",     "wu",    "xi",    "xia",   "xian",  "xiang", "xiao",  "xie",   "xin",    "xing",  "xiong",
-        "xiu",   "xu",     "xuan",  "xue",   "xun",   "xv",    "xve",   "ya",    "yan",   "yang",   "yao",   "ye",
-        "yi",    "yin",    "ying",  "yo",    "yong",  "you",   "yu",    "yuan",  "yue",   "yun",    "yv",    "yve",
-        "za",    "zai",    "zan",   "zang",  "zao",   "ze",    "zei",   "zen",   "zeng",  "zha",    "zhai",  "zhan",
-        "zhang", "zhao",   "zhe",   "zhei",  "zhen",  "zheng", "zhi",   "zhong", "zhou",  "zhu",    "zhua",  "zhuai",
-        "zhuan", "zhuang", "zhui",  "zhun",  "zhuo",  "zi",    "zong",  "zou",   "zu",    "zuan",   "zui",   "zun",
-        "zuo"};
+        "a",     "ai",    "an",    "ang",    "ao",    "ba",   "bai",  "ban",   "bang",  "bao",    "bei",   "ben",
+        "beng",  "bi",    "bian",  "biang",  "biao",  "bie",  "bin",  "bing",  "bo",    "bu",     "ca",    "cai",
+        "can",   "cang",  "cao",   "ce",     "cen",   "ceng", "cha",  "chai",  "chan",  "chang",  "chao",  "che",
+        "chen",  "cheng", "chi",   "chong",  "chou",  "chu",  "chua", "chuai", "chuan", "chuang", "chui",  "chun",
+        "chuo",  "ci",    "cong",  "cou",    "cu",    "cuan", "cui",  "cun",   "cuo",   "da",     "dai",   "dan",
+        "dang",  "dao",   "de",    "dei",    "den",   "deng", "di",   "dia",   "dian",  "diao",   "die",   "ding",
+        "diu",   "dong",  "dou",   "du",     "duan",  "dui",  "dun",  "duo",   "e",     "ei",     "en",    "er",
+        "fa",    "fan",   "fang",  "fei",    "fen",   "feng", "fiao", "fo",    "fou",   "fu",     "ga",    "gai",
+        "gan",   "gang",  "gao",   "ge",     "gei",   "gen",  "geng", "gong",  "gou",   "gu",     "gua",   "guai",
+        "guan",  "guang", "gui",   "gun",    "guo",   "ha",   "hai",  "han",   "hang",  "hao",    "he",    "hei",
+        "hen",   "heng",  "hong",  "hou",    "hu",    "hua",  "huai", "huan",  "huang", "hui",    "hun",   "huo",
+        "ji",    "jia",   "jian",  "jiang",  "jiao",  "jie",  "jin",  "jing",  "jiong", "jiu",    "ju",    "juan",
+        "jue",   "jun",   "jv",    "jvan",   "jve",   "jvn",  "ka",   "kai",   "kan",   "kang",   "kao",   "ke",
+        "kei",   "ken",   "keng",  "kong",   "kou",   "ku",   "kua",  "kuai",  "kuan",  "kuang",  "kui",   "kun",
+        "kuo",   "la",    "lai",   "lan",    "lang",  "lao",  "le",   "lei",   "leng",  "li",     "lia",   "lian",
+        "liang", "liao",  "lie",   "lin",    "ling",  "liu",  "lo",   "long",  "lou",   "lu",     "luan",  "lue",
+        "lun",   "luo",   "lv",    "lve",    "ma",    "mai",  "man",  "mang",  "mao",   "me",     "mei",   "men",
+        "meng",  "mi",    "mian",  "miao",   "mie",   "min",  "ming", "miu",   "mo",    "mou",    "mu",    "na",
+        "nai",   "nan",   "nang",  "nao",    "ne",    "nei",  "nen",  "neng",  "ni",    "nian",   "niang", "niao",
+        "nie",   "nin",   "ning",  "niu",    "nong",  "nou",  "nu",   "nuan",  "nue",   "nun",    "nuo",   "nv",
+        "nve",   "o",     "ou",    "pa",     "pai",   "pan",  "pang", "pao",   "pei",   "pen",    "peng",  "pi",
+        "pian",  "piao",  "pie",   "pin",    "ping",  "po",   "pou",  "pu",    "qi",    "qia",    "qian",  "qiang",
+        "qiao",  "qie",   "qin",   "qing",   "qiong", "qiu",  "qu",   "quan",  "que",   "qun",    "qv",    "qvan",
+        "qve",   "qvn",   "ran",   "rang",   "rao",   "re",   "ren",  "reng",  "ri",    "rong",   "rou",   "ru",
+        "ruan",  "rui",   "run",   "ruo",    "sa",    "sai",  "san",  "sang",  "sao",   "se",     "sen",   "seng",
+        "sha",   "shai",  "shan",  "shang",  "shao",  "she",  "shei", "shen",  "sheng", "shi",    "shou",  "shu",
+        "shua",  "shuai", "shuan", "shuang", "shui",  "shun", "shuo", "si",    "song",  "sou",    "su",    "suan",
+        "sui",   "sun",   "suo",   "ta",     "tai",   "tan",  "tang", "tao",   "te",    "teng",   "ti",    "tian",
+        "tiao",  "tie",   "ting",  "tong",   "tou",   "tu",   "tuan", "tui",   "tun",   "tuo",    "wa",    "wai",
+        "wan",   "wang",  "wei",   "wen",    "weng",  "wo",   "wu",   "xi",    "xia",   "xian",   "xiang", "xiao",
+        "xie",   "xin",   "xing",  "xiong",  "xiu",   "xu",   "xuan", "xue",   "xun",   "xv",     "xvan",  "xve",
+        "xvn",   "ya",    "yan",   "yang",   "yao",   "ye",   "yi",   "yin",   "ying",  "yo",     "yong",  "you",
+        "yu",    "yuan",  "yue",   "yun",    "yv",    "yvan", "yve",  "yvn",   "za",    "zai",    "zan",   "zang",
+        "zao",   "ze",    "zei",   "zen",    "zeng",  "zha",  "zhai", "zhan",  "zhang", "zhao",   "zhe",   "zhei",
+        "zhen",  "zheng", "zhi",   "zhong",  "zhou",  "zhu",  "zhua", "zhuai", "zhuan", "zhuang", "zhui",  "zhun",
+        "zhuo",  "zi",    "zong",  "zou",    "zu",    "zuan", "zui",  "zun",   "zuo"};
     return kList;
 }
 
@@ -214,8 +233,10 @@ bool looks_like_jianpin_spelling(const std::string &pinyin)
     // trailing letter ("zheg" = zhe + g) to count as jianpin intent. The cut
     // backtracks like the query-side segmentation ("zaijinut" = zai'ji'nu + t).
     // All-consonant strings match zero syllables and return false on purpose:
-    // the engine has no multi-letter jianpin, so correction is the only useful
-    // reading of e.g. "bqng" -> bang.
+    // shape alone cannot tell a pure jianpin ("nbn" = 能不能) from a dropped
+    // vowel ("bng" -> bang), so both still enter correction. The dictionary
+    // layer then puts a literal pure-jianpin whole word ahead of the corrected
+    // readings (literal_jianpin_pinyin_match), keeping the correction behind it.
     if (is_complete_pinyin_input(pinyin))
     {
         // Fully reduced to legal syllables: a legitimate spelling, not a typo.
@@ -499,9 +520,28 @@ bool is_complete_pinyin_input(const std::string &pinyin)
     return true;
 }
 
+bool is_jqxy_v_alias(const std::string &syllable)
+{
+    return syllable.size() >= 2 && syllable[1] == 'v' &&
+           (syllable[0] == 'j' || syllable[0] == 'q' || syllable[0] == 'x' || syllable[0] == 'y');
+}
+
+std::string canonical_umlaut_spelling(std::string syllable)
+{
+    if (is_jqxy_v_alias(syllable))
+    {
+        syllable[1] = 'u';
+    }
+    else if (syllable == "nue" || syllable == "lue")
+    {
+        syllable[1] = 'v';
+    }
+    return syllable;
+}
+
 std::string to_google_spelling(const std::string &segmentation)
 {
-    // quanpin_query.cpp 的 canonical_syllable 把 ü 的两种写法归到词库存的那一种
+    // canonical_umlaut_spelling 把 ü 的两种写法归到词库存的那一种
     // （l/n 后面写 v：lve、nve）。Google 的两个解码器要的正好是另一种：本地
     // googlepinyinime-rev 的音节表来自 rawdict_utf16_65105_freq.txt，里面只有
     // nue/lue 和 nv/lv，没有 nve/lve，splparser 也不做 v→ü 转写；inputtools 云输入
@@ -510,10 +550,7 @@ std::string to_google_spelling(const std::string &segmentation)
     //
     // 按音节整体替换，认不出的原样透传：手打分隔符切出来的块可能不止一个音节，
     // 那种块交给解码器自己再切。
-    static const std::unordered_map<std::string, std::string> kSpellings = {
-        {"jv", "ju"},   {"qv", "qu"},   {"xv", "xu"},   {"yv", "yu"},   {"jve", "jue"},
-        {"qve", "que"}, {"xve", "xue"}, {"yve", "yue"}, {"lve", "lue"}, {"nve", "nue"},
-    };
+    const auto &valid_pinyin = intact_pinyin_set();
 
     std::string result;
     result.reserve(segmentation.size());
@@ -522,9 +559,16 @@ std::string to_google_spelling(const std::string &segmentation)
     {
         const size_t separator = segmentation.find('\'', chunk_start);
         const size_t chunk_end = separator == std::string::npos ? segmentation.size() : separator;
-        const std::string chunk = segmentation.substr(chunk_start, chunk_end - chunk_start);
-        const auto found = kSpellings.find(chunk);
-        result += found == kSpellings.end() ? chunk : found->second;
+        std::string chunk = segmentation.substr(chunk_start, chunk_end - chunk_start);
+        if (valid_pinyin.count(chunk))
+        {
+            chunk = canonical_umlaut_spelling(std::move(chunk));
+            if (chunk == "nve" || chunk == "lve")
+            {
+                chunk[1] = 'u';
+            }
+        }
+        result += chunk;
         if (separator == std::string::npos)
         {
             break;
@@ -624,9 +668,9 @@ struct CorrectionTarget
     // pair. The tie-break weight is derived from the ENABLED subset at query
     // time (see min_enabled_correction_weight), never from a switched-off table.
     unsigned type_bit = 0;
-    // Out-of-table generated pair (non-neighbor substitution / arbitrary-letter
-    // insertion): flat expensive-tier weight (kAutocorrectGeneratedShapeWeight)
-    // instead of the per-bit derivation; switch gating still uses type_bit.
+    // Out-of-table generated pair (non-neighbor substitution): flat expensive-tier
+    // weight (kAutocorrectGeneratedShapeWeight) instead of the per-bit derivation;
+    // switch gating still uses type_bit.
     bool generated = false;
 };
 
@@ -720,8 +764,10 @@ struct GeneratedPair
 };
 
 // Enumerate the out-of-table shapes over every legal syllable: non-neighbor
-// substitutions and arbitrary-letter insertions. Transpositions and deletions
-// are exhaustive in the static tables -- nothing to add. Wrong forms must be
+// substitutions only. Transpositions, deletions and all insertions are
+// exhaustive in the static tables -- an inserted letter is always the QWERTY
+// neighbor of an adjacent key (see the generator's insertion rule), so there is
+// nothing left to add here. Wrong forms must be
 // non-legal, at least three letters (shorter strings belong to the jianpin
 // space) and at most six (the k-best piece scan never looks at longer pieces) --
 // the same window as the static tables and the evaluation filter.
@@ -734,6 +780,10 @@ std::vector<GeneratedPair> build_generated_pairs()
         if (syllable.size() < 3)
         {
             continue; // same-length substitutions would violate the 3-letter floor
+        }
+        if (is_jqxy_v_alias(syllable))
+        {
+            continue; // 手误纠到 u 的标准写法即可，几乎没人打的 v 别名不再派生纠错键
         }
         // 非相邻键替换：换上的字母既不是原字母也不是它的 QWERTY 邻键。
         for (size_t i = 0; i < syllable.size(); ++i)
@@ -751,29 +801,6 @@ std::vector<GeneratedPair> build_generated_pairs()
                     continue;
                 }
                 pairs.push_back({std::move(wrong), syllable, kAutocorrectNeighbor});
-            }
-        }
-        // 任意字母插入：插入字母不属于静态覆盖集（该位相邻字母及其邻键）。
-        for (size_t i = 0; i <= syllable.size(); ++i)
-        {
-            const char left = i > 0 ? syllable[i - 1] : '\0';
-            const char right = i < syllable.size() ? syllable[i] : '\0';
-            for (char key = 'a'; key <= 'z'; ++key)
-            {
-                const bool statically_covered = key == left || key == right ||
-                                                (left != '\0' && is_qwerty_neighbor(key, left)) ||
-                                                (right != '\0' && is_qwerty_neighbor(key, right));
-                if (statically_covered)
-                {
-                    continue;
-                }
-                std::string wrong = syllable;
-                wrong.insert(i, 1, key);
-                if (wrong.size() > 6 || legal.find(wrong) != legal.end())
-                {
-                    continue; // 7 letters sit outside the k-best piece scan window
-                }
-                pairs.push_back({std::move(wrong), syllable, kAutocorrectInsertion});
             }
         }
     }
@@ -846,14 +873,14 @@ const std::unordered_map<std::string_view, std::vector<CorrectionTarget>> &corre
 // input letters consumed: equal to syllable.size() for legal syllables and
 // same-length corrections (transposition / neighbor), one less for deletion
 // corrections ("zhng" -> zhang), one more for insertion corrections
-// ("shangg" -> shang).
+// ("sghang" -> shang).
 struct AutocorrectEdge
 {
     size_t raw_length = 0;
     std::string_view syllable;
     bool corrected = false;
-    // Out-of-table generated pair (non-neighbor substitution / arbitrary-letter
-    // insertion). Generated-containing hypotheses rank behind ALL static
+    // Out-of-table generated pair (non-neighbor substitution). Generated-
+    // containing hypotheses rank behind ALL static
     // hypotheses (see the finalize comparator) so in-table inputs keep their
     // baseline cut set.
     bool generated = false;
@@ -1157,8 +1184,8 @@ std::vector<AutocorrectCut> legal_input_correction_cuts(const std::string &pinyi
     // （zi'a、ji'o'a、ni'a），多打一个元音（jiu'zhe'e'yang），漏打声母（jiu'zhe'ang）。
     // 纠正的那段必须盖住这样一个音节：不然 k-best 会跨音节边界重切任何普通输入，
     // 道路 dao'lu 读成 da + olu->lou「大楼」、会的 hui'de 读成 hu + ide->die「蝴蝶」——
-    // 词库扫描里第 2 位的噪声几乎全是这种。生成式空间（静态表之外的远键替换、任意字母
-    // 插入）也不认：它是给切不成合法音节的输入兜底的，放到合法输入上只会拼出巧合。
+    // 词库扫描里第 2 位的噪声几乎全是这种。生成式空间（静态表之外的远键替换）
+    // 也不认：它是给切不成合法音节的输入兜底的，放到合法输入上只会拼出巧合。
     // 先多搜几条再过滤：长句里前几名常被别处更便宜、却不盖零声母音节的纠正占满
     // （jintianjiuzheeyangba 取 3 条时一条都留不下）。与查询层同一个 k。
     constexpr std::size_t kSearchKBest = 9;

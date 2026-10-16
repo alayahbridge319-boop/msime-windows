@@ -89,7 +89,8 @@ enum KEYSTROKE_FUNCTION
     FUNCTION_MOVE_RIGHT_SEGMENT,
 
     // Server-authoritative composition text and language destination.
-    FUNCTION_CYCLE_INPUT_MODE
+    FUNCTION_CYCLE_INPUT_MODE,
+    FUNCTION_TOGGLE_ENGLISH_CANDIDATES
 };
 
 //---------------------------------------------------------------------

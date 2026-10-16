@@ -9,8 +9,13 @@ import { serializeHostMessage } from '../../../../shared/messages';
 type DictionaryType = 'quanpin' | 'wubi' | 'english';
 type DictionaryRow = { code?: string; word: string; weight?: number; display?: string };
 
+const DICTIONARY_LABELS: Record<DictionaryType, string> = { quanpin: '全拼词库', wubi: '五笔词库', english: '英文词库' };
+
+// 异步操作（读文件、等确认、编辑弹窗）期间用户可能切走标签，目标词库一律在用户发起操作时记下，
+// 不要在等待之后再读这里的当前值。
 let dictionary: DictionaryType = 'quanpin';
 let editing: DictionaryRow | null = null;
+let editingDictionary: DictionaryType = dictionary;
 let requestCounter = 0;
 let lastQuery = '';
 const pendingRequests = new Map<string, { action: DictionaryRequest['action']; dictionary: string }>();
@@ -20,12 +25,12 @@ let toastTimer: number | null = null;
 
 function post(action: DictionaryRequest['action'], data: Partial<Omit<DictionaryRequest, 'action' | 'requestId'>> = {}): void {
   const requestId = `dict-${++requestCounter}`;
-  const targetDictionary = dictionary;
+  const targetDictionary = data.dictionary ?? dictionary;
   pendingRequests.set(requestId, { action, dictionary: targetDictionary });
   if (action === 'query') { latestQueryId = requestId; pager?.loading(); }
   window.chrome?.webview?.postMessage(serializeHostMessage({
     type: 'dictionaryRequest',
-    data: { requestId, dictionary, action, ...data }
+    data: { requestId, action, ...data, dictionary: targetDictionary }
   }));
 }
 
@@ -58,7 +63,8 @@ function renderRows(rows: DictionaryRow[]): void {
     indexCell.className = 'dict-index-column';
     indexCell.textContent = String((pager?.offset ?? 0) + index + 1);
     tr.appendChild(indexCell);
-    const values = dictionary === 'english'
+    const rowDictionary = dictionary;
+    const values = rowDictionary === 'english'
       ? [row.word, row.display ?? row.word, String(row.weight ?? 0)]
       : [row.code ?? '', row.word, String(row.weight ?? 0)];
     values.forEach((value) => {
@@ -76,8 +82,8 @@ function renderRows(rows: DictionaryRow[]): void {
     const remove = document.createElement('button'); remove.className = 'dict-row-action danger'; remove.textContent = '删除';
     remove.addEventListener('click', async () => {
       if (!await confirmDialog(`确定删除“${row.word}”吗？`)) return;
-      if (dictionary === 'english') post('delete', { oldWord: row.word, oldDisplay: row.display ?? row.word, word: row.word, display: row.display ?? row.word });
-      else post('delete', { oldCode: row.code, oldWord: row.word, code: row.code, word: row.word, weight: row.weight });
+      if (rowDictionary === 'english') post('delete', { dictionary: rowDictionary, oldWord: row.word, oldDisplay: row.display ?? row.word, word: row.word, display: row.display ?? row.word });
+      else post('delete', { dictionary: rowDictionary, oldCode: row.code, oldWord: row.word, code: row.code, word: row.word, weight: row.weight });
     });
     actions.append(edit, remove); tr.appendChild(actions); return tr;
   }));
@@ -95,6 +101,7 @@ function syncTableHeaderWidth(): void {
 
 function updateMode(): void {
   latestQueryId = '';
+  lastQuery = '';
   pager?.reset();
   const english = dictionary === 'english';
   const quanpin = dictionary === 'quanpin';
@@ -128,6 +135,7 @@ function updateMode(): void {
 
 function openDialog(row: DictionaryRow | null = null): void {
   editing = row;
+  editingDictionary = dictionary;
   const english = dictionary === 'english';
   document.getElementById('dictDialogTitle')!.textContent = row ? '编辑词条' : '新增词条';
   document.getElementById('dictCodeField')!.firstChild!.textContent = english ? '单词' : dictionary === 'quanpin' ? '全拼' : '五笔编码';
@@ -148,7 +156,33 @@ function closeDialog(): void {
 function query(offset = 0): void {
   if (offset === 0) lastQuery = (document.getElementById('dictSearch') as HTMLInputElement).value.trim();
   if (!lastQuery) { showToast('请输入查询内容', false); return; }
+  postQuery(offset);
+}
+
+function postQuery(offset: number): void {
   post('query', { ...(dictionary === 'english' ? { word: lastQuery } : { code: lastQuery }), offset, limit: DICTIONARY_PAGE_SIZE });
+}
+
+// 写操作成功后按上次查询条件原地刷新，不重读搜索框，也不在没有查询时弹提示。
+function refreshQuery(): void {
+  if (lastQuery) postQuery(pager?.offset ?? 0);
+}
+
+function bindImportInput(inputId: string, action: 'import' | 'importHans'): void {
+  document.getElementById(inputId)?.addEventListener('change', async (event) => {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    const targetDictionary = dictionary;
+    try {
+      const content = await readDictionaryFile(file);
+      if (!content.trim()) { showToast('文件内容为空', false); return; }
+      post(action, { dictionary: targetDictionary, content });
+    } catch {
+      showToast('读取文件失败', false);
+    }
+  });
 }
 
 function downloadExport(content: string, filename: string): void {
@@ -181,35 +215,11 @@ export function setupDictionary(): void {
   document.getElementById('dictImportButton')?.addEventListener('click', () => {
     (document.getElementById('dictImportFile') as HTMLInputElement | null)?.click();
   });
-  document.getElementById('dictImportFile')?.addEventListener('change', async (event) => {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-    try {
-      const content = await readDictionaryFile(file);
-      if (!content.trim()) { showToast('文件内容为空', false); return; }
-      post('import', { content });
-    } catch {
-      showToast('读取文件失败', false);
-    }
-  });
+  bindImportInput('dictImportFile', 'import');
   document.getElementById('dictImportHansButton')?.addEventListener('click', () => {
     (document.getElementById('dictImportHansFile') as HTMLInputElement | null)?.click();
   });
-  document.getElementById('dictImportHansFile')?.addEventListener('change', async (event) => {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-    try {
-      const content = await readDictionaryFile(file);
-      if (!content.trim()) { showToast('文件内容为空', false); return; }
-      post('importHans', { content });
-    } catch {
-      showToast('读取文件失败', false);
-    }
-  });
+  bindImportInput('dictImportHansFile', 'importHans');
   document.querySelectorAll<HTMLButtonElement>('[data-export-dictionary]').forEach((button) => {
     button.addEventListener('click', () => {
       const exportDictionary = button.dataset.exportDictionary as DictionaryType | undefined;
@@ -237,10 +247,13 @@ export function setupDictionary(): void {
     const code = (document.getElementById('dictCode') as HTMLInputElement).value.trim();
     const word = (document.getElementById('dictWord') as HTMLInputElement).value.trim();
     const weight = Number((document.getElementById('dictWeight') as HTMLInputElement).value);
-    if (dictionary === 'english') post(editing ? 'update' : 'create', {
-      word: code, display: word, weight, oldWord: editing?.word, oldDisplay: editing?.display ?? editing?.word,
+    if (editingDictionary === 'english') post(editing ? 'update' : 'create', {
+      dictionary: editingDictionary, word: code, display: word, weight,
+      oldWord: editing?.word, oldDisplay: editing?.display ?? editing?.word,
     });
-    else post(editing ? 'update' : 'create', { code, word, weight, oldCode: editing?.code, oldWord: editing?.word });
+    else post(editing ? 'update' : 'create', {
+      dictionary: editingDictionary, code, word, weight, oldCode: editing?.code, oldWord: editing?.word,
+    });
   });
   onHostMessage('dictionaryResponse', payload => {
     if (!payload.requestId.startsWith('dict-')) return;
@@ -260,13 +273,20 @@ export function setupDictionary(): void {
     if (isExport && payload.ok && typeof payload.content === 'string' && typeof payload.filename === 'string') {
       downloadExport(payload.content, payload.filename);
     }
+    // 操作完成时用户已切到别的词库，提示里点明结果属于哪个词库，免得被当成当前页的结果。
+    const message = payload.message ?? (payload.ok ? '操作成功' : '操作失败');
+    const label = DICTIONARY_LABELS[context.dictionary as DictionaryType];
     showToast(
-      payload.message ?? (payload.ok ? '操作成功' : '操作失败'),
+      lastAction !== 'query' && context.dictionary !== dictionary && label ? `${label}：${message}` : message,
       Boolean(payload.ok),
       isImport ? 5600 : 3200,
     );
     if (lastAction === 'query' && payload.ok) renderRows(payload.rows);
-    if (payload.ok && lastAction !== 'query' && !isExport && context.dictionary === dictionary) { closeDialog(); if (lastQuery) query(pager?.offset ?? 0); }
+    if (payload.ok && lastAction !== 'query' && !isExport) {
+      const fromDialog = lastAction === 'create' || lastAction === 'update';
+      if (fromDialog && context.dictionary === editingDictionary) closeDialog();
+      if (context.dictionary === dictionary) refreshQuery();
+    }
   });
   updateMode();
 }

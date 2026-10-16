@@ -68,22 +68,12 @@ std::string remove_delimiters(const std::string &segmented)
 // （查库键、pinyin_segmentation_、调频/造词键因此全部落在标准拼法上）。标准拼音约定：
 // ü 保留鱼眼的音节（n/l 系）键写 v（nv/nve/lv/lve），省略鱼眼的（j/q/x/y 系）键写 u
 // （ju/jue/qu/.../yue）。nu/lu 是真实音节（怒/路），所以 n/l 系只按段精确匹配 nue/lue，
-// 绝不改写 nv/lv/nu/lu。
+// 绝不改写 nv/lv/nu/lu。规则本身在 quanpin::canonical_umlaut_spelling。
 quanpin::Segments normalize_umlaut_aliases(quanpin::Segments segments)
 {
     for (auto &segment : segments)
     {
-        if (segment.size() == 3 && segment[1] == 'u' && segment[2] == 'e' && (segment[0] == 'n' || segment[0] == 'l'))
-        {
-            // nue/lue → nve/lve：词库正键用 v，混拼 u 是它的别名。
-            segment[1] = 'v';
-        }
-        else if (segment.size() >= 2 && segment[1] == 'v' &&
-                 (segment[0] == 'j' || segment[0] == 'q' || segment[0] == 'x' || segment[0] == 'y'))
-        {
-            // j/q/x/y 系没有保留鱼眼的合法音节，v 一律是 u 的别名。
-            segment[1] = 'u';
-        }
+        segment = quanpin::canonical_umlaut_spelling(std::move(segment));
     }
     return segments;
 }
@@ -321,6 +311,12 @@ unsigned literal_mixed_match(const WordItem &item, const std::string &raw_input)
                : 0;
 }
 
+bool literal_jianpin_match(const WordItem &item, const std::string &raw_input)
+{
+    return (item.source == CandidateSource::Database || item.source == CandidateSource::UserDatabase) &&
+           quanpin::literal_jianpin_pinyin_match(raw_input, item.pinyin, item.canonical_pinyin);
+}
+
 // 读音就是 key 这条切分的行（整键块）。整句行按敲的读音（pinyin）认：词格整句的
 // canonical_pinyin 是它实际走的读音，开着模糊音时可能与切分不同（min 走成 ming）。
 bool reads_full_key(const WordItem &item, const std::string &key)
@@ -404,7 +400,8 @@ std::vector<WordItem> QuanpinDictionary::query_exact(const std::string &raw_inpu
     }
 
     pinyin_sequence_ = raw_input;
-    const auto segments = resolve_segments(raw_input, segmentation);
+    const auto segments =
+        resolve_segments(raw_input, segmentation, quanpin::correction_aliases_enabled(autocorrect_types));
 
     // Typing autocorrection: when the spelling is not a legal pinyin
     // combination (the correction cut already fell back to greedy), try to
@@ -489,7 +486,8 @@ std::vector<WordItem> QuanpinDictionary::query_exact(const std::string &raw_inpu
         {
             append_alternative(candidate);
         }
-        const auto correction_paths = quanpin::cut_pinyin_by_mode(raw_input, "correction");
+        const auto correction_paths = quanpin::cut_pinyin_by_mode(
+            raw_input, "correction", quanpin::correction_aliases_enabled(autocorrect_types));
         for (const auto &candidate : correction_paths)
         {
             append_alternative(candidate);
@@ -515,9 +513,12 @@ std::vector<WordItem> QuanpinDictionary::query_exact(const std::string &raw_inpu
         const std::string fallback_segmentation =
             segmentation.empty() ? quanpin::join_segments(segments) : segmentation;
         const auto literal = query_series(raw_input, fallback_segmentation, segments);
+        // 纯简拼字面整词与混合简拼同样领衔：全辅音串照常进纠错（形状分不出 nbn 与漏了元音
+        // 的 bng），但词库里真有这个简拼读法时（nbn「能不能」、bqng「并且能够」），纠错读法
+        // 只排在它后面，仍可选、仍带纠错标记。
         for (const auto &item : literal)
         {
-            if (literal_mixed_match(item, raw_input))
+            if (literal_mixed_match(item, raw_input) || literal_jianpin_match(item, raw_input))
                 literal_mixed.push_back(item);
         }
         append_unique_words(result, literal);
@@ -910,31 +911,31 @@ std::vector<WordItem> QuanpinDictionary::query_series(const std::string &raw_inp
             neural_rerankers.push_back({quanpin::make_neural_reranker(neural_desktop_model_.get(), rescoring_context_),
                                         CandidateSource::NeuralDesktop});
         }
-        // 万象语法模型重排：与其他来源各自独立地从静态 n-best 出发行（Collocation）。
-        if (sentence_association_.collocation_rerank && collocation_db_ != nullptr && collocation_db_->valid())
-        {
-            neural_rerankers.push_back(
-                {quanpin::make_octagram_reranker(collocation_db_, sentence_association_.collocation_rerank_weight),
-                 CandidateSource::Collocation});
-        }
+        // 万象语法模型不再单独重排：加成分只在词格解码期注入一次，〔万象〕行即解码最优路径
+        // （见 WordLatticeOptions::include_collocation_best）。
         quanpin::WordLatticeOptions lattice_options;
+        const bool has_collocation =
+            collocation_db_ != nullptr && collocation_db_->valid() && sentence_association_.collocation_weight != 0.0;
         // 神经模型和去重补位都需要完整候选池；否则只解最优的一条。
         const bool needs_alternatives = !neural_rerankers.empty() || (sentence_association_.word_lattice &&
                                                                       sentence_association_.show_next_on_duplicate);
         lattice_options.nbest = needs_alternatives ? static_cast<int>(neural::RerankOptions{}.max_paths) : 1;
         lattice_options.include_lattice_best = sentence_association_.word_lattice;
+        lattice_options.include_collocation_best = sentence_association_.collocation_rerank && has_collocation;
         lattice_options.show_next_on_duplicate = sentence_association_.show_next_on_duplicate;
         lattice_options.language_model = language_model_;
-        // 万象语法模型的加性搭配项：逐边叠加字级搭配分，与三元模型在同一 Viterbi 里竞争。
-        if (collocation_db_ != nullptr && collocation_db_->valid() && sentence_association_.collocation_weight != 0.0)
+        // 万象语法模型的搭配项：逐边叠加字级搭配分，与三元模型在同一 Viterbi 里竞争。
+        // query() 是自然对数域，乘 kLnToLog10 换到词格的 log10 域；六参数来自配置。
+        if (has_collocation)
         {
-            lattice_options.collocation_scorer = [db = collocation_db_](std::string_view tail, std::string_view word,
-                                                                        bool is_rear) {
-                return db->query(std::string(tail), std::string(word), is_rear, gram::GrammarConfig{});
+            lattice_options.collocation_scorer = [db = collocation_db_,
+                                                  config = sentence_association_.collocation_grammar](
+                                                     std::string_view tail, std::string_view word, bool is_rear) {
+                return db->query(std::string(tail), std::string(word), is_rear, config) * quanpin::kLnToLog10;
             };
             lattice_options.collocation_weight = sentence_association_.collocation_weight;
         }
-        if (sentence_association_.word_lattice || !neural_rerankers.empty())
+        if (sentence_association_.word_lattice || !neural_rerankers.empty() || lattice_options.include_collocation_best)
         {
             quanpin::merge_lattice_candidates(result, segments, lattice_lookup(lattice_options.span_limit),
                                               segmentation.empty() ? raw_input : segmentation, lattice_options,
@@ -993,27 +994,37 @@ std::vector<WordItem> QuanpinDictionary::query_prefix_path(const std::string &ra
     return result;
 }
 
-quanpin::Segments QuanpinDictionary::resolve_segments(const std::string &raw_input, const std::string &segmentation)
+quanpin::Segments QuanpinDictionary::resolve_segments(const std::string &raw_input, const std::string &segmentation,
+                                                      bool include_correction_aliases)
 {
     // 单一归一咽喉点：显式 segmentation 与自动切分两条路径都过这里，进入查询
     // 管线的 segments 由此保证已归一恰一次。查库、调频、造词各调用点因此
     // 不必各自处理别名。
-    quanpin::Segments segments =
-        segmentation.empty() ? get_or_compute_segments(raw_input) : quanpin::split_segments(segmentation);
+    quanpin::Segments segments = segmentation.empty() ? get_or_compute_segments(raw_input, include_correction_aliases)
+                                                      : quanpin::split_segments(segmentation);
     return normalize_umlaut_aliases(std::move(segments));
 }
 
-quanpin::Segments QuanpinDictionary::get_or_compute_segments(const std::string &raw_input)
+quanpin::Segments QuanpinDictionary::get_or_compute_segments(const std::string &raw_input,
+                                                             bool include_correction_aliases)
 {
-    if (const auto *cached = segmentation_cache_.find(raw_input))
+    // 两种掩码状态下同名输入的切分可能不同（手误别名层在 mask != 0 时才跑），缓存键
+    // 带上该标志，避免「开着纠错算出来的 shang」被关掉纠错的同名查询复用。
+    const std::string cache_key = (include_correction_aliases ? "1:" : "0:") + raw_input;
+    if (const auto *cached = segmentation_cache_.find(cache_key))
     {
         return *cached;
     }
 
-    const auto cuts = quanpin::cut_pinyin_by_mode(raw_input, "correction");
+    const auto cuts = quanpin::cut_pinyin_by_mode(raw_input, "correction", include_correction_aliases);
     const auto segments = cuts.empty() ? quanpin::Segments{} : cuts.front();
-    segmentation_cache_.insert(raw_input, segments);
+    segmentation_cache_.insert(cache_key, segments);
     return segments;
+}
+
+std::vector<quanpin::Segments> QuanpinDictionary::cut_for_write(const std::string &pinyin) const
+{
+    return quanpin::cut_pinyin_by_mode(pinyin, "correction", correction_aliases_enabled_);
 }
 
 int QuanpinDictionary::handleVkCode(ImeKeyCode vk, ImeModifierMask modifiers_down, ImeCharacter wch)
@@ -1465,17 +1476,10 @@ std::optional<quanpin::LatticePath> QuanpinDictionary::lattice_best_path(const q
     {
         return *cached;
     }
-    // 与 query_series 的装配保持一致：collocation 项同样参与路径分。
+    // 仲裁回到只用 kenlm：切分/纠错裁决不再让 octagram 参与。搭配项是当前同音/切分被带偏的
+    // 放大器之一，而 librime 的切分器也不由 grammar 驱动（见 design D1）。
     quanpin::WordLatticeOptions lattice_options;
     lattice_options.language_model = language_model_;
-    if (collocation_db_ != nullptr && collocation_db_->valid() && sentence_association_.collocation_weight != 0.0)
-    {
-        lattice_options.collocation_scorer = [db = collocation_db_](std::string_view tail, std::string_view word,
-                                                                    bool is_rear) {
-            return db->query(std::string(tail), std::string(word), is_rear, gram::GrammarConfig{});
-        };
-        lattice_options.collocation_weight = sentence_association_.collocation_weight;
-    }
     // 不带模糊音：这个分用来裁决切分与纠错，模糊读音只给敲定的切分多出整句，不参与投票。
     // 带上它，字面读法会借模糊读音的分压过纠错（jiuzheeyang 的「就这恶言」压过「就这样」）。
     const auto lookup = lattice_lookup(lattice_options.span_limit, false);
@@ -1615,7 +1619,7 @@ void QuanpinDictionary::mark_autocorrect_candidates(std::vector<WordItem> &candi
 int QuanpinDictionary::create_word(std::string pinyin, std::string word)
 {
     pinyin = remove_delimiters(pinyin);
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
     {
         return ERROR_CODE;
@@ -1683,7 +1687,7 @@ int QuanpinDictionary::update_weight_by_word(std::string word)
 int QuanpinDictionary::update_weight_by_pinyin_and_word(std::string pinyin, std::string word)
 {
     pinyin = remove_delimiters(pinyin);
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
         return ERROR_CODE;
     auto segments = cuts.front();
@@ -1707,7 +1711,7 @@ int QuanpinDictionary::update_weight_by_pinyin_and_word(std::string pinyin, std:
 int QuanpinDictionary::delete_by_pinyin_and_word(std::string pinyin, std::string word)
 {
     pinyin = remove_delimiters(pinyin);
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
         return ERROR_CODE;
     const std::string normalized = quanpin::join_segments(cuts.front());
@@ -1727,7 +1731,7 @@ int QuanpinDictionary::insert_word_to_series_cache(const std::string &pinyin, co
         return ERROR_CODE;
     }
 
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     const std::string segmentation = cuts.empty() ? pinyin : quanpin::join_segments(cuts.front());
     const std::string cache_key = series_cache_key(pinyin, segmentation);
     return insert_word_to_series_cache_key(cache_key, pinyin, word, source);
@@ -1742,7 +1746,8 @@ int QuanpinDictionary::insert_word_to_series_cache(const std::string &raw_input,
         return ERROR_CODE;
     }
 
-    const auto segments = resolve_segments(raw_input, segmentation);
+    const auto segments =
+        resolve_segments(raw_input, segmentation, quanpin::correction_aliases_enabled(autocorrect_types));
     const auto resolution = resolve_series_query(raw_input, segments, autocorrect_types);
     return insert_word_to_series_cache_key(resolution.cache_key, raw_input, word, source);
 }
@@ -2049,7 +2054,7 @@ int QuanpinDictionary::delete_data(const std::string &sql_str)
 
 std::string QuanpinDictionary::build_sql_for_creating_word(const std::string &pinyin)
 {
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
     {
         return "";
@@ -2070,7 +2075,7 @@ std::string QuanpinDictionary::build_sql_for_creating_word(const std::string &pi
 
 std::string QuanpinDictionary::build_sql_for_checking_word(const std::string &key, const std::string &value)
 {
-    const auto cuts = quanpin::cut_pinyin_by_mode(key, "correction");
+    const auto cuts = cut_for_write(key);
     if (cuts.empty())
     {
         return "";
@@ -2083,7 +2088,7 @@ std::string QuanpinDictionary::build_sql_for_checking_word(const std::string &ke
 std::string QuanpinDictionary::build_sql_for_inserting_word(const std::string &key, const std::string &jp,
                                                             const std::string &value)
 {
-    const auto cuts = quanpin::cut_pinyin_by_mode(key, "correction");
+    const auto cuts = cut_for_write(key);
     if (cuts.empty())
     {
         return "";
@@ -2101,7 +2106,7 @@ std::string QuanpinDictionary::build_sql_for_updating_word(const std::string &wo
 std::string QuanpinDictionary::build_sql_for_updating_word(std::string pinyin, const std::string &word)
 {
     pinyin = remove_delimiters(pinyin);
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
     {
         return "";
@@ -2130,7 +2135,7 @@ std::string QuanpinDictionary::build_sql_for_updating_word(std::string pinyin, c
 std::string QuanpinDictionary::build_sql_for_deleting_word(std::string pinyin, const std::string &word)
 {
     pinyin = remove_delimiters(pinyin);
-    const auto cuts = quanpin::cut_pinyin_by_mode(pinyin, "correction");
+    const auto cuts = cut_for_write(pinyin);
     if (cuts.empty())
     {
         return "";
@@ -2161,7 +2166,7 @@ bool QuanpinDictionary::do_validate(const std::string &key, const std::string &j
         return false;
     }
 
-    const auto cuts = quanpin::cut_pinyin_by_mode(pure_key, "correction");
+    const auto cuts = cut_for_write(pure_key);
     if (cuts.empty())
     {
         return false;
@@ -2206,12 +2211,16 @@ std::vector<WordItem> QuanpinDictionary::query(const std::string &raw_input, con
 {
     // 词格要按同一套规则收模糊读音，先于 query_exact 下发。
     set_fuzzy_pinyin(fuzzy);
+    // 写回路径随后按这次查询的切分重切（cut_for_write），状态要和查询一致。
+    correction_aliases_enabled_ = quanpin::correction_aliases_enabled(autocorrect);
     auto result = query_exact(raw_input, segmentation, autocorrect);
     if (fuzzy.rules && !raw_input.empty())
     {
         // Keep ordinary cache slots free of preference-specific candidates.
         const auto typed =
-            segmentation.empty() ? quanpin::join_segments(resolve_segments(raw_input, segmentation)) : segmentation;
+            segmentation.empty()
+                ? quanpin::join_segments(resolve_segments(raw_input, segmentation, correction_aliases_enabled_))
+                : segmentation;
         // Specificity is how many typed letters a candidate accounts for, not the raw
         // length of its stored key: alternative cuts ("xi'e" for "xie", "you'di'an"
         // for "you'dian") and fuzzy variants carry apostrophes, so comparing pinyin

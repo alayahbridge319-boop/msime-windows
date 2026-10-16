@@ -401,7 +401,27 @@ bool Scene::OnMouseWheel(const POINT &point, short delta, WPARAM keyState)
             return true;
         }
     }
-    return root_ ? root_->OnMouseWheel(point, delta, keyState) : false;
+    if (!root_)
+    {
+        return false;
+    }
+
+    // Offer the wheel to the visual under the cursor first and bubble it up through its
+    // ancestors, so the innermost scrollable area wins, like in a browser. The root is
+    // the last ancestor, which keeps the old root-only behavior as the fallback.
+    Visual *start = window_ ? FindVisualAt(window_->ClientPixelsToDips(point)) : nullptr;
+    for (Visual *visual = start; visual; visual = visual->GetParentVisual())
+    {
+        if (visual->OnMouseWheel(point, delta, keyState))
+        {
+            return true;
+        }
+        if (visual == root_.get())
+        {
+            return false;
+        }
+    }
+    return root_->OnMouseWheel(point, delta, keyState);
 }
 
 bool Scene::OnTimer(UINT_PTR timerId)

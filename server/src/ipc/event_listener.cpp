@@ -30,6 +30,7 @@
 #include "english/english_ime.h"
 #include "config/ime_config.h"
 #include "engine/contracts/date_time_input.h"
+#include "engine/contracts/uiless_page.h"
 #include "engine/contracts/v_mode_input.h"
 #include "conversion/chinese_converter.h"
 #include "log/candidate_diag_log.h"
@@ -40,7 +41,7 @@ using namespace event_listener_detail;
 namespace event_listener_detail
 {
 bool g_quick_phrase_triggered = false;
-bool g_unicode_mode_triggered = false;
+bool g_radical_mode_triggered = false;
 bool g_date_time_mode_triggered = false;
 bool g_emoji_mode_triggered = false;
 bool g_kaomoji_mode_triggered = false;
@@ -105,6 +106,7 @@ void ApplyUiLessFromPacket(const FanyImeNamedpipeData &pipe_data)
         g_session_uiless = false;
     }
     else if (pipe_data.event_type == FanyImePipeEventType::KeyEvent ||
+             pipe_data.event_type == FanyImePipeEventType::InputStateAction ||
              pipe_data.event_type == FanyImePipeEventType::ShowCandidateWnd ||
              pipe_data.event_type == FanyImePipeEventType::MoveCandidateWnd ||
              pipe_data.event_type == FanyImePipeEventType::HideCandidateWnd)
@@ -207,14 +209,6 @@ void HideCandidateWindowAndDropItems()
 }
 } // namespace event_listener_detail
 
-namespace
-{
-bool IsHexChar(unsigned char ch)
-{
-    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
-}
-} // namespace
-
 namespace event_listener_detail
 {
 bool IsQuickPhraseCompositionActive(const std::string &raw)
@@ -222,15 +216,12 @@ bool IsQuickPhraseCompositionActive(const std::string &raw)
     return g_quick_phrase_triggered && !raw.empty() && raw.front() == 'K';
 }
 
-bool IsUnicodeCompositionActive(const std::string &raw)
+// U 模式：Shift+U 唤醒后整段组合都归它，和 K 模式一样只看唤醒标记与首字符。串里混进的撇号、
+// 大写字母等照常进 raw（TSF 的按键缓冲同样收下它们，两侧才不会错位），只是查不出候选；
+// 判据若要求其余全是 a-z，这种串就会掉回普通拼音路径。
+bool IsRadicalCompositionActive(const std::string &raw)
 {
-    if (!g_unicode_mode_triggered || raw.empty() || raw.front() != 'U')
-        return false;
-    size_t index = 1;
-    if (index < raw.size() && raw[index] == '+')
-        ++index;
-    return std::all_of(raw.begin() + static_cast<std::ptrdiff_t>(index), raw.end(),
-                       [](unsigned char ch) { return IsHexChar(ch); });
+    return g_radical_mode_triggered && !raw.empty() && raw.front() == 'U';
 }
 
 // T 后面是小写唤醒词，或者以数字开头的指定日期时间（形状见 engine/contracts/date_time_input.h）。后者
@@ -291,7 +282,7 @@ bool IsVModeCompositionActive(const std::string &raw)
 void ClearSpecialModeTriggers()
 {
     g_quick_phrase_triggered = false;
-    g_unicode_mode_triggered = false;
+    g_radical_mode_triggered = false;
     g_date_time_mode_triggered = false;
     g_emoji_mode_triggered = false;
     g_kaomoji_mode_triggered = false;
@@ -301,13 +292,20 @@ void ClearSpecialModeTriggers()
 }
 
 // True whenever a K/U/T/E/M/J/Y special-mode composition is in progress, even when the
-// typed text is not yet a complete keyword/hex sequence. Such input must never
+// typed text is not yet a complete keyword/letter sequence. Such input must never
 // be interpreted as normal pinyin.
 bool IsSpecialModeCompositionActive(const std::string &raw)
 {
-    return IsQuickPhraseCompositionActive(raw) || IsUnicodeCompositionActive(raw) || IsDateTimeCompositionActive(raw) ||
+    return IsQuickPhraseCompositionActive(raw) || IsRadicalCompositionActive(raw) || IsDateTimeCompositionActive(raw) ||
            IsEmojiCompositionActive(raw) || IsKaomojiCompositionActive(raw) || IsJianpinCompositionActive(raw) ||
            IsYModeCompositionActive(raw) || IsVModeCompositionActive(raw);
+}
+
+bool IsWubiLiteralComposition(const std::string &raw)
+{
+    // T 模式按触发标记认，不按 IsDateTimeCompositionActive 的形状认：模式里敲了主体不收的键
+    // （TdatE），组合只是不再出日期，里面的字母仍然不是要上屏的五笔码（tdat）。
+    return (g_date_time_mode_triggered && !raw.empty() && raw.front() == 'T') || IsVModeCompositionActive(raw);
 }
 } // namespace event_listener_detail
 
@@ -698,6 +696,21 @@ bool SendCurrentDataToClient(uint64_t client_id, uint64_t activation_epoch, uint
     return sent;
 }
 
+namespace
+{
+std::wstring BuildUiLessPagePayload(const std::wstring &preedit)
+{
+    const std::wstring page = BuildUiLessCandidatePageW();
+    ::WriteDataToSharedMemory(page, true);
+    auto &ui = Global::candidate_ui;
+    const int selection = ui.page_words.empty()
+                              ? 0
+                              : std::clamp(ui.selected_index_in_page, 0, static_cast<int>(ui.page_words.size()) - 1);
+    return FanyImeUiLessPage::Format(preedit, page, selection,
+                                     Global::candidate_page_generation.load(std::memory_order_acquire));
+}
+} // namespace
+
 bool SendUiLessCompositionToClient(uint64_t client_id, uint64_t activation_epoch, uint64_t request_id)
 {
     std::wstring preedit;
@@ -705,15 +718,26 @@ bool SendUiLessCompositionToClient(uint64_t client_id, uint64_t activation_epoch
     {
         preedit = GetTsfPreedit();
     }
-    const std::wstring page = BuildUiLessCandidatePageW();
-    ::WriteDataToSharedMemory(page, true);
-    auto &ui = Global::candidate_ui;
-    const int selection = ui.page_words.empty()
-                              ? 0
-                              : std::clamp(ui.selected_index_in_page, 0, static_cast<int>(ui.page_words.size()) - 1);
     Global::MsgTypeToTsf = Global::DataFromServerMsgType::UiLessComposition;
-    Global::candidate_ui.selected_text = preedit + L'\t' + page + L'\t' + std::to_wstring(selection);
+    Global::candidate_ui.selected_text = BuildUiLessPagePayload(preedit);
     return SendCurrentDataToClient(client_id, activation_epoch, request_id);
+}
+
+void PushUiLessCandidatesToOwner()
+{
+    if (!IsUiLessMode())
+    {
+        return;
+    }
+    const FanyImeIpc::CandidateUiOwner owner = SnapshotCandidateUiOwner();
+    if (!owner || !IsPipeActivationCurrent(owner.client_id, owner.activation_epoch))
+    {
+        return;
+    }
+    // Preedit is left empty: the push only replaces the list, composition text belongs to the key path.
+    SendToTsfWorkerThreadClientViaNamedpipe(owner.client_id, owner.activation_epoch,
+                                            Global::DataFromServerMsgTypeToTsfWorkerThread::UiLessCandidatesChanged,
+                                            BuildUiLessPagePayload(L""));
 }
 
 void ClearState()

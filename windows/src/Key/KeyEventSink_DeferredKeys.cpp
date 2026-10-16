@@ -9,6 +9,7 @@
 #include "KeyHandlerEditSession.h"
 #include "KeyFocusRecovery.h"
 #include "KeyRepeatGuard.h"
+#include "CapsLockInputPolicy.h"
 #include "stats_collector.h"
 #include "stats_passthrough.h"
 #include "CaretAnchorPolicy.h"
@@ -47,7 +48,6 @@ struct DeferredShadowState
     std::wstring rawInput;
     size_t caret = 0;
     bool candidateActive = false;
-    bool unicodeMode = false;
     // False once a queued key's effect on the future composition is unknown.
     // The projection is then discarded and the next key re-reads reality.
     bool projectionValid = true;
@@ -81,16 +81,11 @@ void ApplyDeferredKeyState(DeferredShadowState &shadow, const _KEYSTROKE_STATE &
         shadow.rawInput.clear();
         shadow.caret = 0;
         shadow.candidateActive = false;
-        shadow.unicodeMode = false;
     };
 
     switch (keyState.Function)
     {
     case FUNCTION_INPUT:
-        if (shadow.inputLength == 0)
-        {
-            shadow.unicodeMode = (wch == L'U');
-        }
         shadow.caret = min(shadow.caret, shadow.rawInput.size());
         // 和真正加入按键缓冲时一样，分号触发的句中辅助码记成反引号。
         wch = CCompositionProcessorEngine::NormalizeMidSentenceHelpcodeTrigger(wch, shadow.rawInput.data(),
@@ -115,7 +110,6 @@ void ApplyDeferredKeyState(DeferredShadowState &shadow, const _KEYSTROKE_STATE &
         shadow.caret = shadow.rawInput.size();
         shadow.inputLength = shadow.rawInput.size();
         shadow.candidateActive = false;
-        shadow.unicodeMode = (wch == L'U');
         break;
     case FUNCTION_BACKSPACE:
         shadow.caret = min(shadow.caret, shadow.rawInput.size());
@@ -128,7 +122,6 @@ void ApplyDeferredKeyState(DeferredShadowState &shadow, const _KEYSTROKE_STATE &
         if (shadow.inputLength == 0)
         {
             shadow.candidateActive = false;
-            shadow.unicodeMode = false;
         }
         break;
     case FUNCTION_BACKSPACE_SEGMENT:
@@ -165,6 +158,7 @@ void ApplyDeferredKeyState(DeferredShadowState &shadow, const _KEYSTROKE_STATE &
         clearComposition();
         break;
     }
+    case FUNCTION_TOGGLE_ENGLISH_CANDIDATES:
     case FUNCTION_CANCEL:
         clearComposition();
         break;
@@ -184,7 +178,6 @@ void ApplyDeferredKeyState(DeferredShadowState &shadow, const _KEYSTROKE_STATE &
         if (shadow.inputLength == 0)
         {
             shadow.candidateActive = false;
-            shadow.unicodeMode = false;
         }
         break;
     case FUNCTION_MOVE_RIGHT:
@@ -315,8 +308,6 @@ void CMetasequoiaIME::_EnsureDeferredKeyProjection()
     // letter extends the same raw input.  Only an explicit/original candidate
     // list makes the next input a finalize-and-start-new boundary.
     _deferredProjectedCandidateActive = _candidateMode == CANDIDATE_ORIGINAL;
-    _deferredProjectedUnicodeMode =
-        _pCompositionProcessorEngine && _pCompositionProcessorEngine->IsUnicodeModeComposition() != FALSE;
 }
 
 void CMetasequoiaIME::_ApplyDeferredKeyProjection(const _KEYSTROKE_STATE &keyState, WCHAR wch)
@@ -331,7 +322,6 @@ void CMetasequoiaIME::_ApplyDeferredKeyProjection(const _KEYSTROKE_STATE &keySta
     shadow.rawInput = _deferredProjectedRawInput;
     shadow.caret = _deferredProjectedCaret;
     shadow.candidateActive = _deferredProjectedCandidateActive;
-    shadow.unicodeMode = _deferredProjectedUnicodeMode;
     ApplyDeferredKeyState(shadow, keyState, wch);
     if (keyState.Function == FUNCTION_CANCEL && !GlobalIme::word_for_creating_word.empty())
     {
@@ -352,7 +342,6 @@ void CMetasequoiaIME::_ApplyDeferredKeyProjection(const _KEYSTROKE_STATE &keySta
         _deferredProjectedRawInput.clear();
         _deferredProjectedCaret = 0;
         _deferredProjectedCandidateActive = false;
-        _deferredProjectedUnicodeMode = false;
         return;
     }
     _deferredProjectedImeOpen = shadow.imeOpen;
@@ -362,7 +351,6 @@ void CMetasequoiaIME::_ApplyDeferredKeyProjection(const _KEYSTROKE_STATE &keySta
     _deferredProjectedRawInput = std::move(shadow.rawInput);
     _deferredProjectedCaret = shadow.caret;
     _deferredProjectedCandidateActive = shadow.candidateActive;
-    _deferredProjectedUnicodeMode = shadow.unicodeMode;
 
     if (keyState.Function == FUNCTION_BACKSPACE && shadow.inputLength == 0)
     {
@@ -392,7 +380,6 @@ void CMetasequoiaIME::_ApplyDeferredPreservedKeyProjection(REFGUID preservedKey)
         _deferredProjectedRawInput.clear();
         _deferredProjectedCaret = 0;
         _deferredProjectedCandidateActive = false;
-        _deferredProjectedUnicodeMode = false;
         break;
     case CCompositionProcessorEngine::PreservedKeyAction::ToggleDoubleSingleByteMode:
         _deferredProjectedDoubleSingleByteOpen = !_deferredProjectedDoubleSingleByteOpen;
@@ -433,10 +420,11 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
         keyState->Function = FUNCTION_TOGGLE_CHARACTER_SET;
         return true;
     }
-    if (projectedImeOpen && IsEnglishInputModeToggle(*classifiedCode, capturedModifiers))
+    if (projectedImeOpen && !_serverUnavailableFallbackActive && !_IsKeyboardDisabled() &&
+        IsEnglishInputModeToggle(*classifiedCode, capturedModifiers))
     {
         keyState->Category = CATEGORY_COMPOSING;
-        keyState->Function = FUNCTION_CANCEL;
+        keyState->Function = FUNCTION_TOGGLE_ENGLISH_CANDIDATES;
         return true;
     }
 
@@ -493,7 +481,6 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
         shadow.rawInput = _deferredProjectedRawInput;
         shadow.caret = _deferredProjectedCaret;
         shadow.candidateActive = _deferredProjectedCandidateActive;
-        shadow.unicodeMode = _deferredProjectedUnicodeMode;
     }
     else
     {
@@ -512,7 +499,6 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
         shadow.caret =
             min(static_cast<size_t>(_pCompositionProcessorEngine->GetCaretPosition()), shadow.rawInput.size());
         shadow.candidateActive = _candidateMode == CANDIDATE_ORIGINAL;
-        shadow.unicodeMode = _pCompositionProcessorEngine->IsUnicodeModeComposition() != FALSE;
     }
 
     const auto setKeyState = [keyState](KEYSTROKE_CATEGORY category, KEYSTROKE_FUNCTION function) {
@@ -594,11 +580,16 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
             isInputKey = CCompositionProcessorEngine::IsVModeInputKey(*classifiedWch, shadow.rawInput.data(),
                                                                       shadow.rawInput.size(), shadow.caret);
         }
-        if (shadow.inputLength == 0 && (GetKeyState(VK_CAPITAL) & 0x0001) != 0 && *classifiedWch >= L'A' &&
-            *classifiedWch <= L'Z' && *classifiedCode >= L'A' && *classifiedCode <= L'Z')
+        // Same "input in progress" as _IsKeyEaten: a live candidate list or the
+        // #35 retraction window keeps the key IME-owned even with an empty
+        // projected buffer, and without a projection the real state decides.
+        const bool inputInProgress =
+            shadow.inputLength != 0 || shadow.candidateActive || !GlobalIme::word_for_creating_word.empty() ||
+            (!_deferredKeyProjectionValid && (_IsComposing() != FALSE || _candidateMode != CANDIDATE_NONE));
+        if (ShouldPassCapsLockAlphabet((GetKeyState(VK_CAPITAL) & 0x0001) != 0, inputInProgress, *classifiedCode,
+                                       *classifiedWch))
         {
-            // Match the normal fresh-composition path: CapsLock uppercase at
-            // the beginning belongs to the application.
+            // Match the normal fresh-composition path for CapsLock with or without Shift
             isInputKey = false;
         }
     }
@@ -640,11 +631,6 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
             return setKeyState(CATEGORY_CANDIDATE, FUNCTION_MOVE_PAGE_BOTTOM);
         case VK_OEM_MINUS:
         case VK_OEM_PLUS:
-            if (*classifiedCode == VK_OEM_PLUS && shadow.unicodeMode && shadow.inputLength == 1 &&
-                *classifiedWch == L'+')
-            {
-                return setKeyState(CATEGORY_COMPOSING, FUNCTION_INPUT);
-            }
             if (shadow.japaneseMode)
             {
                 // 日语模式禁用 -/= 翻页：'-' 输入长音符（ー），其余字符退回标点上屏。
@@ -669,21 +655,7 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
 
         if (*classifiedCode >= L'1' && *classifiedCode <= L'9')
         {
-            // U-mode: bare digits compose hex; Shift+1..9 selects candidates.
-            if (shadow.unicodeMode)
-            {
-                const bool shift_only = (capturedModifiers & 0b00000111u) == 0b00000001u;
-                if (shift_only)
-                {
-                    return setKeyState(CATEGORY_CANDIDATE, FUNCTION_SELECT_BY_NUMBER);
-                }
-                return setKeyState(CATEGORY_COMPOSING, FUNCTION_INPUT);
-            }
             return setKeyState(CATEGORY_CANDIDATE, FUNCTION_SELECT_BY_NUMBER);
-        }
-        if (*classifiedCode == L'0' && shadow.unicodeMode)
-        {
-            return setKeyState(CATEGORY_COMPOSING, FUNCTION_INPUT);
         }
         if (Global::CommitWithHighlightedCandPunc.count(*classifiedWch) > 0 ||
             (shadow.punctuationOpen && _pCompositionProcessorEngine->IsPunctuation(*classifiedWch)))
@@ -716,7 +688,9 @@ bool CMetasequoiaIME::_QueueDeferredKeyDown(_In_ ITfContext *pContext, WPARAM wP
                                             bool scheduleDrain)
 {
     // Repeats are owned but do not enqueue another global configuration toggle.
-    if (keyState.Function == FUNCTION_TOGGLE_CHARACTER_SET && (lParam & 0x40000000) != 0)
+    if ((keyState.Function == FUNCTION_TOGGLE_CHARACTER_SET ||
+         keyState.Function == FUNCTION_TOGGLE_ENGLISH_CANDIDATES) &&
+        (lParam & 0x40000000) != 0)
         return true;
     if (pContext == nullptr || !_DeferredKeyQueueHasCapacity())
     {
@@ -824,7 +798,6 @@ void CMetasequoiaIME::_ClearDeferredKeyDowns()
     _deferredProjectedRawInput.clear();
     _deferredProjectedCaret = 0;
     _deferredProjectedCandidateActive = false;
-    _deferredProjectedUnicodeMode = false;
     _shiftHotkeyArmed = false;
     _ctrlHotkeyArmed = false;
     _backspaceHoldArmed = false;
@@ -841,7 +814,6 @@ void CMetasequoiaIME::_ArmEmptyDeferredProjection()
     _deferredProjectedRawInput.clear();
     _deferredProjectedCaret = 0;
     _deferredProjectedCandidateActive = false;
-    _deferredProjectedUnicodeMode = false;
 }
 
 void CMetasequoiaIME::_ReleaseIdleDeferredProjection()
@@ -859,7 +831,6 @@ void CMetasequoiaIME::_ReleaseIdleDeferredProjection()
     _deferredProjectedRawInput.clear();
     _deferredProjectedCaret = 0;
     _deferredProjectedCandidateActive = false;
-    _deferredProjectedUnicodeMode = false;
 }
 
 void CMetasequoiaIME::_ResetSessionAfterFailure(DeferredKeyFailureKind kind)
@@ -919,7 +890,6 @@ void CMetasequoiaIME::_CompleteDeferredKeyReplay(uint64_t replayToken)
         _deferredProjectedRawInput.clear();
         _deferredProjectedCaret = 0;
         _deferredProjectedCandidateActive = false;
-        _deferredProjectedUnicodeMode = false;
     }
     _deferredKeyInFlight = {};
     _hasDeferredKeyInFlight = false;
@@ -1090,6 +1060,10 @@ void CMetasequoiaIME::_DrainOneDeferredKeyDown()
     if (_serverUnavailableFallbackActive)
     {
         _KEYSTROKE_STATE offlineState = key.keyState;
+        // The English-candidate toggle projects no state; offline it only clears
+        // the composition, as it did before it had its own function.
+        if (offlineState.Function == FUNCTION_TOGGLE_ENGLISH_CANDIDATES)
+            offlineState.Function = FUNCTION_CANCEL;
         if (offlineState.Function == FUNCTION_CYCLE_INPUT_MODE)
         {
             // Its tail was classified for the projected destination. The

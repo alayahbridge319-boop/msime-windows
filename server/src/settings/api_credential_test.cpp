@@ -1,9 +1,12 @@
 #include "api_credential_test.h"
+#include "api_credential_test_request.h"
 
+#include "cloud/ai_translation.h"
 #include "cloud/custom_translation.h"
 #include "cloud/niutrans_translation.h"
 #include "cloud/tencent_tmt.h"
 #include "cloud/translation_gloss.h"
+#include "config/ime_config.h"
 #include "voice-input/doubao_asr_client.h"
 #include "voice-input/voice_providers.h"
 
@@ -156,19 +159,9 @@ ApiCredentialTest::Result TestChat(const ApiCredentialTest::Request &request)
         return {false, "请先填写有效的 API Key。"};
     if (!IsHttpEndpoint(endpoint) || model.empty())
         return {false, "请填写有效的 HTTPS 接口地址和模型名。"};
-    nlohmann::json body = {{"model", model},
-                           {"stream", false},
-                           {"max_tokens", 1},
-                           {"messages", {{{"role", "user"}, {"content", "Reply OK"}}}}};
-    // Vendor fields follow the endpoint, not the label: the DeepSeek slot can hold any
-    // OpenAI-compatible service, and thinking.type makes services that do not accept it
-    // (MiniMax among them) reject the request instead of answering it.
-    const auto vendor = VoiceInput::VendorForRequest(Value(request, "provider"), endpoint);
-    if (vendor == VoiceInput::ChatVendor::DeepSeek)
-        body["thinking"] = {{"type", "disabled"}};
-    else if (vendor == VoiceInput::ChatVendor::SiliconFlow)
-        body["enable_thinking"] = false;
-    const std::string payload = body.dump();
+    const std::string provider = Value(request, "provider");
+    const std::string payload =
+        ApiCredentialTest::detail::BuildChatProbeRequestBody(provider, model, endpoint).dump();
     const HttpResponse response = PerformJsonRequest(endpoint, token, &payload);
     if (response.code == CURLE_OK && response.status >= 200 && response.status < 300)
         return {true, "连接成功，API Key 和模型配置有效。"};
@@ -263,7 +256,15 @@ ApiCredentialTest::Result TestBatchAsr(const ApiCredentialTest::Request &request
 ApiCredentialTest::Result TestTranslation(const ApiCredentialTest::Request &request)
 {
     std::vector<std::string> translated;
-    if (request.service == "translation.tencent")
+    if (request.service == "translation.ai")
+    {
+        // 复用 AI 辅助当前服务商的配置，页面上没有独立的地址与密钥输入框。
+        const auto config = AiTranslation::FromConfiguredTranslation(*GetConfiguredTranslation());
+        if (!AiTranslation::IsUsableConfig(config))
+            return {false, "请先在 AI 辅助页面填写有效的接口地址、Token 和模型。"};
+        translated = AiTranslation::TextTranslateBatch(config, {"测试"}, "zh", "en");
+    }
+    else if (request.service == "translation.tencent")
     {
         const TencentTmt::Credentials credentials{Value(request, "secretId"), Value(request, "secretKey"),
                                                   "ap-guangzhou"};

@@ -654,6 +654,11 @@ void WorkerThread()
             {
                 break;
             }
+            // 日文候选没有拼音词库的行：置顶会按罗马音键写进拼音日志，升级回放时变成中文候选（#869）。
+            if (task.type == TaskType::UiPinCandidate && item.scheme == SchemeType::JapaneseRomaji)
+            {
+                break;
+            }
 
             const bool english_candidate = item.source == CandidateSource::EnglishDictionary;
             const auto ranking_keys = RankingKeysForCandidate(item);

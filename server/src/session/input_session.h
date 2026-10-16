@@ -36,6 +36,12 @@ class IInputSession
     {
         return std::nullopt;
     }
+    // U 模式拆字反查：code 是唤醒键 U 之后的部件拼音连写，拆字表按本会话捕获的资源布局
+    // 解析，语义见 engine local_modes::query_radical。默认没有候选。
+    virtual std::vector<WordItem> query_radical(const std::string &) const
+    {
+        return {};
+    }
 
     virtual const std::string &get_pinyin_sequence() const = 0;
     virtual const std::string &get_pinyin_sequence_with_cases() const = 0;
@@ -92,6 +98,11 @@ class IInputSession
 
     virtual void set_pinyin_sequence(const std::string &pinyin_sequence) = 0;
     virtual void set_pinyin_sequence_with_cases(const std::string &pinyin_sequence) = 0;
+    // 随上面两个调用一起设：这一串是五笔会话里特殊模式（T/V）的字面输入，语义见 engine
+    // InputSession::set_wubi_literal_input。默认什么也不做。
+    virtual void set_wubi_literal_input(bool)
+    {
+    }
 
     // R2 光标前缀重算：把组合态光标喂给会话，nullopt = 串尾（整串解码，默认）。
     // 语义与 engine/core/input_session.h 的同名方法一致；只更新状态，候选在下一次

@@ -127,7 +127,8 @@ bool IsImplicitActivationEvent(UINT event_type)
     // background callback and must never steal routing from the focused TSF
     // client. A real key, and a FocusRestored the tip only emits after
     // ITfThreadMgr::IsThreadFocus confirmed ownership, are unambiguous.
-    return event_type == FanyImePipeEventType::KeyEvent || event_type == FanyImePipeEventType::FocusRestored;
+    return event_type == FanyImePipeEventType::KeyEvent || event_type == FanyImePipeEventType::InputStateAction ||
+           event_type == FanyImePipeEventType::FocusRestored;
 }
 
 // client_id is PID << 32 | TID of the TSF thread. A match against the
@@ -199,6 +200,7 @@ bool IsKnownMainPipeEvent(UINT event_type)
 {
     switch (event_type)
     {
+    case FanyImePipeEventType::InputStateAction:
     case FanyImePipeEventType::KeyEvent:
     case FanyImePipeEventType::HideCandidateWnd:
     case FanyImePipeEventType::ShowCandidateWnd:
@@ -236,7 +238,9 @@ bool IsValidMainPipeFrame(const FanyImeNamedpipeData &pipe_data)
     {
         return false;
     }
-    if (pipe_data.event_type == FanyImePipeEventType::KeyEvent && pipe_data.request_id == 0)
+    if ((pipe_data.event_type == FanyImePipeEventType::KeyEvent ||
+         pipe_data.event_type == FanyImePipeEventType::InputStateAction) &&
+        pipe_data.request_id == 0)
     {
         return false;
     }
@@ -521,6 +525,11 @@ void MainPipeClientThread(HANDLE clientPipe, uint64_t handlerId)
             continue;
         }
 
+        if (pipeData.event_type == FanyImePipeEventType::InputStateAction &&
+            (!ClientNegotiatedInputStateShortcuts(clientId) ||
+             pipeData.keycode != static_cast<unsigned>(FanyImeInputStateShortcuts::Action::EnglishCandidates)))
+            continue;
+
         PipeClientActivation activation = GetActivePipeClient();
         if (IsImplicitActivationEvent(pipeData.event_type))
         {
@@ -558,6 +567,7 @@ void MainPipeClientThread(HANDLE clientPipe, uint64_t handlerId)
         LogPipeEvent(L"main-pipe", pipeData.event_type, pipeData.keycode, pipeData.wch, pipeData.modifiers_down);
         switch (pipeData.event_type)
         {
+        case FanyImePipeEventType::InputStateAction:
         case FanyImePipeEventType::KeyEvent: {
             // 与 worker 侧的 dispatch 探针配对：reader 收到键包即记，两边对照可把丢键
             // 精确到「reader 未收到」还是「worker 未派发」。request_id 是 DLL 侧分配的，

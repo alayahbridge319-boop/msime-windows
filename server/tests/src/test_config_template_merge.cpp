@@ -19,6 +19,20 @@ TEST_CASE(font_fallback_upgrade_preserves_legacy_fonts_and_order)
             std::string::npos);
 }
 
+TEST_CASE(radical_mode_upgrade_inherits_renamed_unicode_mode_switch)
+{
+    const std::string next = "[utility]\nradical_mode = true\n";
+    const std::string old_template = "[utility]\nunicode_mode = true\n";
+    // 关掉过旧开关的用户，升级后新开关也是关的；改名不能把 Shift+U 悄悄重新打开。
+    REQUIRE(
+        MergeConfigIntoTemplate(next, "[utility]\nunicode_mode = false\n", old_template).find("radical_mode = false") !=
+        std::string::npos);
+    REQUIRE(MergeConfigIntoTemplate(next, old_template, old_template).find("radical_mode = true") != std::string::npos);
+    // 已经有新键时以新键为准，残留的旧键不再起作用。
+    REQUIRE(MergeConfigIntoTemplate(next, "[utility]\nunicode_mode = false\nradical_mode = true\n", next)
+                .find("radical_mode = true") != std::string::npos);
+}
+
 TEST_CASE(shortcut_config_upgrade_preserves_word_selection_and_adds_defaults)
 {
     const std::string old_config =
@@ -31,6 +45,27 @@ TEST_CASE(shortcut_config_upgrade_preserves_word_selection_and_adds_defaults)
     REQUIRE(merged.find("word_to_character_keys = \"brackets\"") != std::string::npos);
     REQUIRE(merged.find("switch_language_shift = false") != std::string::npos);
     REQUIRE(merged.find("toggle_character_set_ctrl_shift_f = true") != std::string::npos);
+}
+
+TEST_CASE(input_state_shortcut_upgrade_preserves_custom_and_disabled_bindings)
+{
+    std::ifstream input(MSIME_DEFAULT_CONFIG_PATH, std::ios::binary);
+    REQUIRE(static_cast<bool>(input));
+    const std::string installed((std::istreambuf_iterator<char>(input)), {});
+    const std::string legacy = "[keybindings]\nswitch_language_shift = true\n";
+    const auto added = toml::parse(MergeConfigIntoTemplate(installed, legacy, legacy));
+    for (const auto &definition : FanyImeInputStateShortcuts::Definitions)
+    {
+        REQUIRE_EQ(added["keybindings"][definition.key].value_or(std::string()),
+                   std::string(definition.defaultBinding));
+        for (const std::string binding : {"Ctrl+Shift+KeyG", ""})
+        {
+            const std::string configured = legacy + std::string(definition.key) + " = \"" + binding + "\"\n";
+            const auto merged = toml::parse(MergeConfigIntoTemplate(installed, configured, legacy));
+            REQUIRE_EQ(merged["keybindings"][definition.key].value_or(std::string("missing")), binding);
+            REQUIRE(merged["keybindings"]["switch_language_shift"].value_or(false));
+        }
+    }
 }
 
 TEST_CASE(config_merge_adds_default_caret_state_indicator)
@@ -83,6 +118,36 @@ TEST_CASE(shipped_caret_indicator_defaults_and_upgrade_behavior)
     const std::string previous_off = "[general]\nfloating_toolbar = true\ncaret_state_indicator = false\n";
     const auto opted_in = toml::parse(MergeConfigIntoTemplate(installed, enabled, previous_off));
     REQUIRE(opted_in["general"]["caret_state_indicator"].value_or(false));
+}
+
+TEST_CASE(shipped_translation_pos_defaults_and_upgrade_preserve_user_choice)
+{
+    std::ifstream input(MSIME_DEFAULT_CONFIG_PATH, std::ios::binary);
+    REQUIRE(static_cast<bool>(input));
+    const std::string installed((std::istreambuf_iterator<char>(input)), {});
+    const auto working_path =
+        std::filesystem::path(MSIME_DEFAULT_CONFIG_PATH).parent_path().parent_path().parent_path() /
+        "server/assets/config/config.toml";
+    std::ifstream development(working_path, std::ios::binary);
+    REQUIRE(static_cast<bool>(development));
+    const std::string working((std::istreambuf_iterator<char>(development)), {});
+    REQUIRE(toml::parse(installed)["general"]["candidate_translation_show_pos"].value_or(false));
+    REQUIRE(toml::parse(working)["general"]["candidate_translation_show_pos"].value_or(false));
+
+    const std::string old_template = "[general]\ncandidate_translations = false\n";
+    const auto upgraded = toml::parse(MergeConfigIntoTemplate(installed, old_template, old_template));
+    REQUIRE(upgraded["general"]["candidate_translation_show_pos"].value_or(false));
+    for (const bool show : {false, true})
+    {
+        const std::string configured =
+            old_template + "candidate_translation_show_pos = " + (show ? "true\n" : "false\n");
+        for (const auto &baseline : {std::string(), old_template, installed})
+        {
+            const auto preserved = toml::parse(MergeConfigIntoTemplate(installed, configured, baseline));
+            REQUIRE_EQ(preserved["general"]["candidate_translation_show_pos"].value_or(!show), show);
+            REQUIRE(!preserved["general"]["candidate_translations"].value_or(true));
+        }
+    }
 }
 
 TEST_CASE(shipped_tsf_diagnostic_log_survives_template_upgrade)
@@ -183,7 +248,7 @@ TEST_CASE(shipped_fresh_install_defaults_do_not_flip_upgraded_users)
     std::ifstream input(MSIME_DEFAULT_CONFIG_PATH, std::ios::binary);
     REQUIRE(static_cast<bool>(input));
     const std::string installed((std::istreambuf_iterator<char>(input)), {});
-    const std::string previous_defaults = "[general]\nemoji_mixed_input = true\n"
+    const std::string previous_defaults = "[general]\nemoji_mixed_input = true\ncandidate_translations = true\n"
                                           "[input]\ndefault_ime_mode = \"english\"\n"
                                           "[appearance]\ncandidate_window_layout = \"vertical\"\n"
                                           "candidate_skin = \"willow_green\"\n"
@@ -196,6 +261,7 @@ TEST_CASE(shipped_fresh_install_defaults_do_not_flip_upgraded_users)
 
     const auto upgraded = toml::parse(MergeConfigIntoTemplate(installed, previous_defaults, previous_defaults));
     REQUIRE(upgraded["general"]["emoji_mixed_input"].value_or(false));
+    REQUIRE(upgraded["general"]["candidate_translations"].value_or(false));
     REQUIRE_EQ(upgraded["input"]["default_ime_mode"].value_or(std::string()), std::string("english"));
     REQUIRE_EQ(upgraded["appearance"]["candidate_window_layout"].value_or(std::string()), std::string("vertical"));
     REQUIRE_EQ(upgraded["appearance"]["candidate_skin"].value_or(std::string()), std::string("willow_green"));

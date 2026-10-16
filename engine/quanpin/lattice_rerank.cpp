@@ -2,7 +2,6 @@
 
 #include "../neural/rescore_worker.h"
 
-#include <numeric>
 #include <optional>
 #include <vector>
 
@@ -48,46 +47,6 @@ LatticeReranker make_neural_reranker(const neural::SentenceModel *model, const s
         for (std::size_t index : *order)
         {
             reordered.push_back(paths[index]);
-        }
-        paths = std::move(reordered);
-        return true;
-    };
-}
-
-LatticeReranker make_octagram_reranker(const std::shared_ptr<const gram::GramDb> &db, double weight)
-{
-    if (db == nullptr || !db->valid() || weight == 0.0)
-    {
-        return {};
-    }
-    return [db, weight](std::vector<LatticePath> &paths) -> bool {
-        if (paths.size() < 2)
-        {
-            return false;
-        }
-        // 整句搭配分 = 相邻词对的搭配项之和（词对i的上下文取其前全部词的文本，
-        // .gram 查询自己截尾窗），句尾词吃 rear 项。
-        std::vector<double> scores(paths.size());
-        for (size_t p = 0; p < paths.size(); ++p)
-        {
-            double bonus = 0;
-            std::string context;
-            for (size_t i = 0; i < paths[p].words.size(); ++i)
-            {
-                const bool is_rear = i + 1 == paths[p].words.size();
-                bonus += db->query(context, paths[p].words[i], is_rear, gram::GrammarConfig{});
-                context += paths[p].words[i];
-            }
-            scores[p] = paths[p].log_prob + weight * bonus;
-        }
-        std::vector<size_t> order(paths.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return scores[a] > scores[b]; });
-        std::vector<LatticePath> reordered;
-        reordered.reserve(paths.size());
-        for (size_t index : order)
-        {
-            reordered.push_back(std::move(paths[index]));
         }
         paths = std::move(reordered);
         return true;

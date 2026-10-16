@@ -22,10 +22,12 @@ constexpr bool IsSupported(std::string_view value)
 }
 
 // Legacy/unknown stored settings migrate to the native default; new writes must be supported.
+// The settings window is the exception: it reads appearance.settings_ui_backend, where WebView2
+// stays the default and Direct2D is an explicit, experimental opt-in.
 constexpr Backend Resolve(Surface surface, std::string_view configured)
 {
     if (surface == Surface::Settings)
-        return Backend::WebView2;
+        return configured == "d2d" ? Backend::Native : Backend::WebView2;
     return configured == "webview2" || configured == "webview" || configured == "web" ? Backend::WebView2
                                                                                       : Backend::Native;
 }
