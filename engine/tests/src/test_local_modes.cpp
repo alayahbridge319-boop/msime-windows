@@ -359,6 +359,9 @@ int run_test()
         database.execute("INSERT INTO kaomoji VALUES('haixiu','hx','(*/ω＼*)',30)");
         database.execute("INSERT INTO kaomoji VALUES('kiss','','( ˘ ³˘)♥',40)");
         database.execute("INSERT INTO kaomoji VALUES('kind','','single prefix',50)");
+        // 长键 + 更靠前的目录位置，用来验证它不会压过精确命中。
+        database.execute("INSERT INTO kaomoji VALUES('bai','','exact match',146)");
+        database.execute("INSERT INTO kaomoji VALUES('baifo','','longer key',140)");
     }
 
     const auto emoji = metasequoia::local_modes::query_emoji("XIAOLIAN", SchemeType::Quanpin, others_database, 10);
@@ -418,6 +421,17 @@ int run_test()
         metasequoia::local_modes::query_kaomoji("hx", SchemeType::Shuangpin, others_database, 10);
     require(shuangpin_kaomoji.candidates.size() == 2 && shuangpin_kaomoji.candidates.front().word == "(*/ω＼*)",
             "Kaomoji lookup did not expand Xiaohe shuangpin or deduplicate merged matches.");
+
+    // 精确命中排在更长键之前：bai 必须先是自己的键，而不是 baifo 的目录位置更靠前的那条。
+    const auto kaomoji_exact_first =
+        metasequoia::local_modes::query_kaomoji("bai", SchemeType::Quanpin, others_database, 10);
+    require(kaomoji_exact_first.candidates.size() == 2 && kaomoji_exact_first.candidates[0].word == "exact match" &&
+                kaomoji_exact_first.candidates[1].word == "longer key",
+            "Kaomoji lookup did not rank an exact key match above a longer prefix match.");
+    require(metasequoia::local_modes::query_kaomoji("bai", SchemeType::Quanpin, others_database, 1)
+                    .candidates.front()
+                    .word == "exact match",
+            "Kaomoji lookup dropped an exact key match when the prefix tier filled the limit.");
 
     const auto missing_emoji = metasequoia::local_modes::query_emoji(
         "privatecode", SchemeType::Quanpin, quick_phrase_directory / "private-others-missing.db", 10);

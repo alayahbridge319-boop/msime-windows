@@ -91,43 +91,61 @@ LocalQueryResult query_kaomoji(const std::string &code, SchemeType scheme, const
     };
     std::vector<Entry> entries;
     std::unordered_set<std::string> seen;
-    constexpr const char *kSql = "SELECT kaomoji,sort_order FROM kaomoji "
-                                 "WHERE (pinyin>=?1 AND pinyin<?2) OR (jianpin>=?1 AND jianpin<?2) "
-                                 "ORDER BY sort_order LIMIT ?3";
-    for (const std::string &prefix : prefixes)
+    // 同 emoji：精确命中（pinyin 或 jianpin 等于输入码）排在更长键的前缀命中之前。
+    // 只按目录顺序排时，短码会被「更长键 + 靠前 sort_order」盖过——bai 的精确命中被 baifo 顶掉。
+    constexpr const char *kExactSql = "SELECT kaomoji,sort_order FROM kaomoji WHERE pinyin=?1 OR jianpin=?1 "
+                                      "ORDER BY sort_order LIMIT ?2";
+    constexpr const char *kPrefixSql = "SELECT kaomoji,sort_order FROM kaomoji "
+                                       "WHERE (pinyin>?1 AND pinyin<?2) OR (jianpin>?1 AND jianpin<?2) "
+                                       "ORDER BY sort_order LIMIT ?3";
+    for (int tier = 0; tier < 2; ++tier)
     {
-        sqlite3_stmt *raw_statement = nullptr;
-        if (sqlite3_prepare_v2(database.get(), kSql, -1, &raw_statement, nullptr) != SQLITE_OK)
+        const char *sql = tier == 0 ? kExactSql : kPrefixSql;
+        std::vector<Entry> tier_entries;
+        for (const std::string &prefix : prefixes)
         {
-            return query_failure("Kaomoji database could not be queried.");
-        }
-        Statement statement(raw_statement);
-        std::string upper_bound = prefix;
-        upper_bound.push_back(static_cast<char>(0x7f));
-        if (sqlite3_bind_text(statement.get(), 1, prefix.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
-            sqlite3_bind_text(statement.get(), 2, upper_bound.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
-            sqlite3_bind_int(statement.get(), 3, limit) != SQLITE_OK)
-        {
-            return query_failure("Kaomoji database could not be queried.");
-        }
-
-        int step_result = SQLITE_ROW;
-        while ((step_result = sqlite3_step(statement.get())) == SQLITE_ROW)
-        {
-            const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 0));
-            if (text != nullptr && seen.insert(text).second)
+            sqlite3_stmt *raw_statement = nullptr;
+            if (sqlite3_prepare_v2(database.get(), sql, -1, &raw_statement, nullptr) != SQLITE_OK)
             {
-                entries.push_back({text, sqlite3_column_int(statement.get(), 1)});
+                return query_failure("Kaomoji database could not be queried.");
+            }
+            Statement statement(raw_statement);
+            std::string upper_bound = prefix;
+            upper_bound.push_back(static_cast<char>(0x7f));
+            bool bound = sqlite3_bind_text(statement.get(), 1, prefix.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+            if (tier == 0)
+            {
+                bound = bound && sqlite3_bind_int(statement.get(), 2, limit) == SQLITE_OK;
+            }
+            else
+            {
+                bound = bound &&
+                        sqlite3_bind_text(statement.get(), 2, upper_bound.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+                        sqlite3_bind_int(statement.get(), 3, limit) == SQLITE_OK;
+            }
+            if (!bound)
+            {
+                return query_failure("Kaomoji database could not be queried.");
+            }
+
+            int step_result = SQLITE_ROW;
+            while ((step_result = sqlite3_step(statement.get())) == SQLITE_ROW)
+            {
+                const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(statement.get(), 0));
+                if (text != nullptr && seen.insert(text).second)
+                {
+                    tier_entries.push_back({text, sqlite3_column_int(statement.get(), 1)});
+                }
+            }
+            if (step_result != SQLITE_DONE)
+            {
+                return query_failure("Kaomoji database could not be queried.");
             }
         }
-        if (step_result != SQLITE_DONE)
-        {
-            return query_failure("Kaomoji database could not be queried.");
-        }
+        std::stable_sort(tier_entries.begin(), tier_entries.end(),
+                         [](const Entry &left, const Entry &right) { return left.sort_order < right.sort_order; });
+        entries.insert(entries.end(), tier_entries.begin(), tier_entries.end());
     }
-
-    std::stable_sort(entries.begin(), entries.end(),
-                     [](const Entry &left, const Entry &right) { return left.sort_order < right.sort_order; });
     const std::size_t count = std::min(static_cast<std::size_t>(limit), entries.size());
     LocalQueryResult result;
     result.candidates.reserve(count);
