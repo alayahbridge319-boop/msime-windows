@@ -328,6 +328,13 @@ LRESULT WaveOverlay::handle_message(HWND hwnd, UINT message, WPARAM wParam, LPAR
     case WM_CAPTURECHANGED:
         action_pressed_ = false;
         return 0;
+    case WM_RBUTTONUP:
+        // 右键一律当作取消。这个窗口是 WS_POPUP + WS_EX_NOACTIVATE，右键落在它
+        // 上面本来就会被吃掉，前台应用的右键菜单也弹不出来；把它定义成取消，
+        // 可以保证在任何状态下（按钮被隐藏时同样有效）都有一个鼠标退出通道。
+        if (action_handler_)
+            action_handler_(Action::Cancel);
+        return 0;
     case kTranscriptChangedMessage:
         if (!actions_visible_.load())
             action_pressed_ = false;
