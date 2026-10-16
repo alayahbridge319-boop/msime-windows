@@ -4,6 +4,7 @@
 #include "ai_assistant_request.h"
 
 #include "utils/network_proxy.h"
+#include <msime/voice/provider_protocol.h>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -88,7 +89,10 @@ std::string Fetch(const AiAssistant::Request &request, uint64_t generation)
     {
         const auto outer = nlohmann::json::parse(response);
         const std::string content = outer.at("choices").at(0).at("message").at("content").get<std::string>();
-        const auto result_json = nlohmann::json::parse(content);
+        // MiniMax M3.1 这类强制思考的模型会把思考过程混进 content（<think>…</think>），
+        // 不剥掉的话下面的 JSON 解析直接失败，联想候选就静默消失。
+        const std::string clean = metasequoia::voice::strip_reasoning(content);
+        const auto result_json = nlohmann::json::parse(clean);
         const auto &candidates = result_json.at("candidates");
         if (!candidates.is_array() || candidates.empty())
         {
