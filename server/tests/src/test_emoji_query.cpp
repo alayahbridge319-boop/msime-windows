@@ -11,6 +11,8 @@
 namespace
 {
 const std::string kSmiley = "\xF0\x9F\x98\x80"; // 😀
+const std::string kCrying = "\xF0\x9F\x98\xA2"; // 😢
+const std::string kSweat = "\xF0\x9F\x98\x85";  // 😅
 
 bool EmojiDatabaseAvailable()
 {
@@ -56,6 +58,19 @@ TEST_CASE(emoji_query_prefix_matches_english_word)
                                                                GetShuangpinProfile(GetConfiguredShuangpinSchema()))
                              .candidates;
     REQUIRE(Contains(results, kSmiley));
+}
+
+TEST_CASE(emoji_query_exact_key_outranks_longer_prefix)
+{
+    if (!EmojiDatabaseAvailable())
+        return;
+    // 用户反馈：打 ku（哭）第一个出的是 kuxiao（苦笑）的 😅。精确命中要排在更长前缀之前。
+    const auto results = metasequoia::local_modes::query_emoji("ku", SchemeType::Quanpin, 10,
+                                                               GetShuangpinProfile(GetConfiguredShuangpinSchema()))
+                             .candidates;
+    REQUIRE(!results.empty());
+    REQUIRE_EQ(results[0].word, kCrying);
+    REQUIRE(results[0].word != kSweat);
 }
 
 TEST_CASE(emoji_query_xiaohe_shuangpin_expands_to_quanpin)

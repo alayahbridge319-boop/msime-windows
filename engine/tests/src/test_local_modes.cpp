@@ -349,6 +349,10 @@ int run_test()
         database.execute("INSERT INTO emoji_pinyin VALUES('xl','😀',10)");
         database.execute("INSERT INTO emoji_pinyin VALUES('laugh','😀',10)");
         database.execute("INSERT INTO emoji_pinyin VALUES('xnlm','raw shuangpin match',40)");
+        // 长键 + 更靠前的目录位置，用来验证它不会压过精确命中。
+        database.execute("INSERT INTO emoji_pinyin VALUES('kuxiao','😅',5)");
+        database.execute("INSERT INTO emoji_pinyin VALUES('ku','😢',93)");
+        database.execute("INSERT INTO emoji_pinyin VALUES('ku','😭',94)");
         database.execute("CREATE TABLE kaomoji(pinyin TEXT,jianpin TEXT,kaomoji TEXT,sort_order INTEGER)");
         database.execute("INSERT INTO kaomoji VALUES('haixiu','hx','(*/ω＼*)',10)");
         database.execute("INSERT INTO kaomoji VALUES('haixiu','hx','(^_^)',20)");
@@ -383,6 +387,18 @@ int run_test()
                 .candidates.empty() &&
             metasequoia::local_modes::query_emoji("x", SchemeType::Quanpin, others_database, 0).candidates.empty(),
         "Emoji lookup did not honor its validation and limit rules.");
+
+    // 精确命中要排在「更长的键」前面：ku 必须先是 😢，而不是 kuxiao（苦笑）的 😅。见 issue 反馈「打 ku 出流汗」。
+    const auto exact_first = metasequoia::local_modes::query_emoji("ku", SchemeType::Quanpin, others_database, 10);
+    require(exact_first.candidates.size() == 3 && exact_first.candidates[0].word == "😢" &&
+                exact_first.candidates[1].word == "😭" && exact_first.candidates[2].word == "😅",
+            "Emoji lookup did not rank an exact key match above a longer prefix match.");
+    // 混输取 3 条时，精确命中不能被前缀命中的 LIMIT 截掉。
+    const auto exact_first_limited =
+        metasequoia::local_modes::query_emoji("ku", SchemeType::Quanpin, others_database, 3);
+    require(exact_first_limited.candidates.size() == 3 && exact_first_limited.candidates[0].word == "😢" &&
+                exact_first_limited.candidates[2].word == "😅",
+            "Emoji lookup dropped an exact key match when the prefix tier filled the limit.");
 
     const auto kaomoji = metasequoia::local_modes::query_kaomoji("HAIXIU", SchemeType::Quanpin, others_database, 10);
     require(!kaomoji.diagnostic.has_value() && kaomoji.candidates.size() == 2 &&
