@@ -6,6 +6,7 @@
 #include "voice_input_service.h"
 #include "config/ime_config.h"
 #include "doubao_asr_client.h"
+#include "log/candidate_diag_log.h"
 #include "voice_providers.h"
 #include "voice_batch_protocol.h"
 #include "ipc/ipc.h"
@@ -332,6 +333,17 @@ LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam)
             g_ralt_pressed = false;
     }
 
+    // 录音期间即使 TIP 已经失去激活，也必须还能用 Esc 收掉这次录音。提示条是
+    // HWND_TOPMOST 的独立窗口，不随输入法激活状态消失；而长按热键的松手事件在
+    // 切走输入法时就收不到了（下面的 !g_ime_active 分支会把它直接放行），
+    // 这时 Esc 是唯一的兜底。
+    if (key->vkCode == VK_ESCAPE && g_recording.load())
+    {
+        if (down)
+            PostMessageW(g_message_window, kCancelRecordingMessage, 0, 0);
+        return 1;
+    }
+
     if (!g_ime_active)
     {
         // A shortcut key-down already consumed while this TIP was active must
@@ -631,10 +643,11 @@ std::string Polish(const std::string &text, const VoiceInputConfig &config)
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     // Polishing is optional: if it cannot finish promptly, abort the request and
     // let the caller commit the original ASR text returned below.
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,
-                     VoiceInput::UsesDeepSeekThinking(config.polish_provider, config.polish_thinking)
-                         ? kPolishThinkingTimeoutMs
-                         : kPolishTimeoutMs);
+    curl_easy_setopt(
+        curl, CURLOPT_TIMEOUT_MS,
+        VoiceInput::UsesDeepSeekThinking(config.polish_provider, config.polish_endpoint, config.polish_thinking)
+            ? kPolishThinkingTimeoutMs
+            : kPolishTimeoutMs);
     const CURLcode result = curl_easy_perform(curl);
     long http_status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
@@ -646,8 +659,10 @@ std::string Polish(const std::string &text, const VoiceInputConfig &config)
     {
         return metasequoia::voice::parse_polished_text(response);
     }
-    catch (...)
+    catch (const std::exception &error)
     {
+        // 润色失败或整段都是思考（剥完为空）：回退原始 ASR 文本，原因进诊断日志。
+        DIAG_LOGF(L"voice: polish failed ({}), committing original asr text", string_to_wstring(error.what()));
         return text;
     }
 }
@@ -878,6 +893,16 @@ void AbortPendingStart(const char *reason)
     }
 }
 
+// 配置类错误仍要告知用户，但绝不能在控制线程上模态等待——弹窗挂着的期间，
+// 下一次语音的指令队列整个被卡住（提示条卡死的元凶之一）。挪到独立线程展示，
+// 队列照常运转；连点几次也只是多几个各自可关闭的窗口。
+void ShowVoiceNotice(std::wstring message, unsigned icon = MB_ICONERROR)
+{
+    std::thread([message = std::move(message), icon] {
+        MessageBoxW(nullptr, message.c_str(), L"水杉 IME", MB_OK | icon);
+    }).detach();
+}
+
 bool StartRecording()
 {
     if (g_recording)
@@ -893,8 +918,7 @@ bool StartRecording()
     const std::string asr_token = VoiceInput::ResolveAsrToken(config);
     if (asr_token.empty())
     {
-        MessageBoxW(nullptr, L"请先在设置的“语音输入”分区填写当前 ASR 提供商的 API Token。", L"水杉 IME",
-                    MB_OK | MB_ICONINFORMATION);
+        ShowVoiceNotice(L"请先在设置的“语音输入”分区填写当前 ASR 提供商的 API Token。", MB_ICONINFORMATION);
         return false;
     }
     g_starting = true;
@@ -913,7 +937,10 @@ bool StartRecording()
     }
     g_overlay.set_show_transcript(!g_stream_inline_this_session.load());
     g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
-    g_overlay.set_actions_visible(false);
+    // 录音中就把取消/确认按钮亮出来。长按 RAlt 时松手事件可能因为切换输入法、
+    // Alt-Tab 或别的低级键盘钩子而丢失，而提示条是 HWND_TOPMOST 的独立窗口，
+    // 没有按钮就等于没有任何办法把它关掉。
+    g_overlay.set_actions_visible(true);
     g_overlay.set_transcript(L"");
     if (use_doubao)
     {
@@ -937,7 +964,7 @@ bool StartRecording()
             g_stream_inline_this_session.store(false);
             g_last_inline_preedit.clear();
             g_doubao_asr.reset();
-            MessageBoxW(nullptr, L"无法启动豆包流式语音识别。请检查 config.toml。", L"水杉 IME", MB_OK | MB_ICONERROR);
+            ShowVoiceNotice(L"无法启动豆包流式语音识别。请检查 config.toml。");
             g_starting = false;
             return false;
         }
@@ -950,7 +977,7 @@ bool StartRecording()
     if (!g_capture.start(AudioCallback))
     {
         AbortPendingStart("capture start failed");
-        MessageBoxW(nullptr, L"无法启动麦克风。", L"水杉 IME", MB_OK | MB_ICONERROR);
+        ShowVoiceNotice(L"无法启动麦克风。");
         return false;
     }
     if (g_abort_start.exchange(false))
@@ -974,18 +1001,22 @@ void StopRecording()
 {
     if (!g_recording)
         return;
-    g_capture.stop();
-    if (g_capture.callback_failed())
-    {
-        CancelRecording();
-        MessageBoxW(nullptr, L"录音中断，请重试。", L"水杉 IME", MB_OK | MB_ICONERROR);
-        return;
-    }
     const VoiceInputConfig config = GetConfiguredVoiceInput();
     g_recording = false;
     g_ralt_lock_mode = false;
     g_overlay.set_listening(false);
     g_overlay.set_input_level(0.0f);
+    // 先收掉提示条再关设备：WASAPI 的 stop() 可能阻塞（设备被独占或驱动挂住），
+    // 阻塞时不能让置顶的录音条留在屏幕上。正常路径下 stop 只需几毫秒，这一次
+    // hide 不会被看见，下面的识别态会立刻把它重新显示出来。
+    g_overlay.hide();
+    g_capture.stop();
+    if (g_capture.callback_failed())
+    {
+        CancelRecording();
+        ShowVoiceNotice(L"录音中断，请重试。");
+        return;
+    }
     RestoreSystemAudioIfMuted();
     if (config.end_sound)
         g_cue_player.play_end();
@@ -1016,6 +1047,7 @@ void StopRecording()
     }
     if (recorded_frames < kSampleRate / 4)
     {
+        DIAG_LOGF(L"voice: recording shorter than 0.25s ({} frames), treating as no speech", recorded_frames);
         {
             std::lock_guard<std::mutex> send_lock(g_send_mutex);
             ++g_voice_session;
@@ -1068,9 +1100,14 @@ void StopRecording()
                 g_overlay.set_actions_visible(false);
                 g_overlay.hide();
             }
+            // 识别失败（静音、没说出话、服务商对空音频报错等）保持静默：
+            // 不弹窗、不提交、提示条照常收起，就像什么都没发生。
+            // 但原因要进诊断日志——部署在别的机器上排查时，这是唯一的证据；
+            // 只记服务商名和错误文案，绝不记语音内容或转写文本。
             if (!recognition.error.empty())
             {
-                MessageBoxW(nullptr, string_to_wstring(recognition.error).c_str(), L"水杉 IME", MB_OK | MB_ICONERROR);
+                DIAG_LOGF(L"voice: asr failed, provider={}, error={}", string_to_wstring(config.asr_provider),
+                          string_to_wstring(recognition.error));
             }
             const std::string text = recognition.error.empty() ? Polish(recognition.text, config) : std::string();
             if (!batch_recognition && !polishing && !stream_inline && g_voice_session == voice_session && !text.empty())
@@ -1131,14 +1168,17 @@ void CancelRecording()
         ++g_voice_session;
         CancelInlinePreedit();
     }
-    g_capture.stop();
     g_ralt_lock_mode = false;
     g_overlay.set_listening(false);
     g_overlay.set_input_level(0.0f);
     g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
     g_overlay.set_actions_visible(false);
+    // 取消是最后一道退出通道，必须先让提示条消失再关设备：g_capture.stop()
+    // 一旦阻塞，置顶的窗口就会一直留在屏幕上，而且它没有标题栏、没有任务栏项、
+    // 也不接受焦点，用户拿它没有任何办法。
     g_overlay.hide();
     g_overlay.set_transcript(L"");
+    g_capture.stop();
     RestoreSystemAudioIfMuted();
     if (config.end_sound)
         g_cue_player.play_end();
