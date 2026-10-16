@@ -2,6 +2,7 @@ import { applyDropdownValue, applyToggleState, setupDropdownMenu, setupToggleBut
 import { updateConfig } from './config-sync';
 import { setupCredentialTest } from './credential-test';
 import { setupModelFetch } from './model-fetch';
+import { makeProviderId, sendProviderSync, type RegistryEntry } from './provider-sync';
 
 type ProviderDefaults = { endpoint: string; model: string };
 
@@ -26,31 +27,75 @@ const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
     model: 'qwen/qwen3.8-27b'
   },
+  minimax: {
+    endpoint: 'https://api.minimax.cn/v1/chat/completions',
+    model: 'MiniMax-M3.1-Flash-Preview'
+  },
+  moonshot: {
+    endpoint: 'https://api.moonshot.cn/v1/chat/completions',
+    model: 'kimi-k2-0905-preview'
+  },
+  zhipu: {
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    model: 'glm-4-flash'
+  },
+  dashscope: {
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-plus'
+  },
+  volcengine: {
+    endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+    model: 'doubao-seed-1.6-flash'
+  },
+  openrouter: {
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'openrouter/auto'
+  },
   custom: {
     endpoint: '',
     model: ''
   }
 };
 
-const PROVIDERS = ['deepseek', 'openai', 'siliconflow', 'groq', 'custom'] as const;
+const PROVIDERS = [
+  'deepseek', 'openai', 'siliconflow', 'groq', 'minimax', 'moonshot', 'zhipu', 'dashscope',
+  'volcengine', 'openrouter', 'custom'
+] as const;
 let tokens: Record<string, string> = {};
 let endpoints: Record<string, string> = {};
 let models: Record<string, string> = {};
+// 服务商注册表：数据目录里 ai_providers.json 的镜像，HanaAgent 式的任意 OpenAI 兼容服务。
+let registry: RegistryEntry[] = [];
 let currentProvider = 'deepseek';
 let currentPromptId = 'custom_1';
 let customPrompts: Record<string, string> = { custom_1: '', custom_2: '', custom_3: '' };
 
 function applyProviderFields(provider: string): void {
-  const defaults = PROVIDER_DEFAULTS[provider];
-  if (!defaults) return;
+  const registered = registry.find(entry => entry.id === provider);
+  const defaults = PROVIDER_DEFAULTS[provider] ?? { endpoint: registered?.endpoint ?? '', model: registered?.model ?? '' };
   const endpoint = document.getElementById('aiEndpoint') as HTMLInputElement | null;
   const model = document.getElementById('aiModel') as HTMLInputElement | null;
-  // 空值和 Server 一致地表示提供商默认值
-  if (endpoint) endpoint.value = endpoints[provider] || defaults.endpoint;
+  // 空值和 Server 一致地表示提供商默认值；注册表里的条目就是自己的默认值。
+  if (endpoint) endpoint.value = endpoints[provider] || registered?.endpoint || defaults.endpoint;
   if (model) {
-    model.value = models[provider] || defaults.model;
-    model.placeholder = defaults.model;
+    model.value = models[provider] || registered?.model || defaults.model;
+    model.placeholder = defaults.model || registered?.model || '';
   }
+  // 把字段标签标上当前服务商名：同屏还有「添加新服务商」的地址栏，不标名字分不清哪栏管哪个。
+  const displayName = registered?.name || defaults_display_name(provider);
+  const endpointLabel = document.getElementById('aiEndpointLabel');
+  const tokenLabel = document.getElementById('aiTokenLabel');
+  if (endpointLabel) endpointLabel.textContent = `接口地址（${displayName}）`;
+  if (tokenLabel) tokenLabel.textContent = `API Token（${displayName}）`;
+}
+
+// 内置槽位的显示名。注册表条目用条目自己的 name。
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  deepseek: 'DeepSeek', openai: 'OpenAI', siliconflow: 'SiliconFlow', groq: 'Groq', custom: 'Custom'
+};
+
+function defaults_display_name(provider: string): string {
+  return PROVIDER_DISPLAY_NAMES[provider] ?? provider;
 }
 
 // 思考强度只有 DeepSeek 会发给服务商，其他服务商下隐藏，已保存的档位保留不动。
@@ -119,6 +164,110 @@ function currentAiConfig(): Record<string, string> {
 // 切换服务商后旧的模型列表和在途请求都不再适用，清空等待重新获取。
 let clearModelMenu: () => void = () => {};
 
+// 注册表驱动下拉菜单：条目即服务商，末尾固定一项「添加」。菜单是事件委托，动态重建不影响点击。
+function rebuildProviderMenu(): void {
+  const menu = document.getElementById('aiProviderMenu');
+  if (!menu) return;
+  menu.replaceChildren();
+  registry.forEach(entry => {
+    const item = document.createElement('div');
+    item.className = 'dropdown-item';
+    item.dataset.value = entry.id;
+    item.textContent = PROVIDER_DISPLAY_NAMES[entry.id] || entry.name || entry.id;
+    menu.appendChild(item);
+  });
+  const add = document.createElement('div');
+  add.className = 'dropdown-item';
+  add.dataset.value = '__add__';
+  add.textContent = '＋ 添加服务商…';
+  menu.appendChild(add);
+}
+
+function registryFromConfig(raw: unknown): RegistryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const entry = item as Record<string, unknown>;
+    const field = (key: string): string => (typeof entry[key] === 'string' ? (entry[key] as string) : '');
+    const id = field('id');
+    if (!id) return [];
+    return [{ id, name: field('name'), endpoint: field('endpoint'), token: field('token'), model: field('model') }];
+  });
+}
+
+async function syncRegistry(entries: RegistryEntry[]): Promise<boolean> {
+  const status = document.getElementById('aiProviderSyncStatus');
+  if (status) {
+    status.textContent = '正在保存…';
+    status.dataset.kind = 'pending';
+  }
+  const ok = await sendProviderSync(entries, status);
+  if (ok) registry = entries;
+  rebuildProviderMenu();
+  return ok;
+}
+
+function setupProviderManagement(): void {
+  const form = document.getElementById('aiProviderAddForm');
+  const nameInput = document.getElementById('aiProviderAddName') as HTMLInputElement | null;
+  const endpointInput = document.getElementById('aiProviderAddEndpoint') as HTMLInputElement | null;
+  const confirmButton = document.getElementById('aiProviderAddConfirm');
+  const deleteButton = document.getElementById('aiProviderDeleteButton');
+  const addButton = document.getElementById('aiProviderAddButton');
+
+  const openForm = (): void => {
+    form?.removeAttribute('hidden');
+    nameInput?.focus();
+  };
+  addButton?.addEventListener('click', openForm);
+
+  const submit = (): void => {
+    const name = nameInput?.value.trim() ?? '';
+    const endpoint = endpointInput?.value.trim() ?? '';
+    if (!name || !/^https?:\/\//.test(endpoint)) {
+      const status = document.getElementById('aiProviderSyncStatus');
+      if (status) {
+        status.textContent = '请填写名称和 https:// 开头的接口地址。';
+        status.dataset.kind = 'error';
+      }
+      return;
+    }
+    const entry: RegistryEntry = { id: makeProviderId(name, registry), name, endpoint, token: '', model: '' };
+    void syncRegistry([...registry, entry]).then(ok => {
+      if (!ok) return;
+      if (nameInput) nameInput.value = '';
+      if (endpointInput) endpointInput.value = '';
+      form?.setAttribute('hidden', '');
+      // 直接切到新条目，用户接着填 Token 就行。
+      switchProvider(entry.id);
+    });
+  };
+  confirmButton?.addEventListener('click', submit);
+  [nameInput, endpointInput].forEach(input => input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submit();
+    }
+    if (event.key === 'Escape') form?.setAttribute('hidden', '');
+  }));
+
+  deleteButton?.addEventListener('click', () => {
+    if (registry.length <= 1) {
+      const status = document.getElementById('aiProviderSyncStatus');
+      if (status) {
+        status.textContent = '至少保留一个服务商。';
+        status.dataset.kind = 'error';
+      }
+      return;
+    }
+    const remaining = registry.filter(entry => entry.id !== currentProvider);
+    void syncRegistry(remaining).then(ok => {
+      if (!ok) return;
+      switchProvider(remaining[0].id);
+    });
+  });
+}
+
 export function setupAiSettings(): void {
   setupToggleButton('aiEnabled', value => updateConfig('ai_assistant.enabled', value));
   setupTokenVisibilityToggle();
@@ -139,8 +288,17 @@ export function setupAiSettings(): void {
   document.getElementById('aiProviderMenu')?.addEventListener('click', (event) => {
     const item = (event.target as HTMLElement | null)?.closest('.dropdown-item') as HTMLElement | null;
     const provider = item?.dataset.value;
+    if (provider === '__add__') {
+      // 末尾的「添加服务商」项：打开表单，不切换当前服务商。
+      // 按钮标签要还原成当前服务商名，否则当前服务商看起来像被顶掉了。
+      document.getElementById('aiProviderAddForm')?.removeAttribute('hidden');
+      document.getElementById('aiProviderAddName')?.focus();
+      applyDropdownValue('aiProviderBtn', 'aiProviderMenu', currentProvider);
+      return;
+    }
     if (provider) switchProvider(provider);
   });
+  setupProviderManagement();
   document.getElementById('aiPromptSlotMenu')?.addEventListener('click', (event) => {
     const item = (event.target as HTMLElement | null)?.closest('.dropdown-item') as HTMLElement | null;
     const id = item?.dataset.value;
@@ -221,6 +379,17 @@ export function applyAiConfig(config: Record<string, unknown>): void {
     const slot = config[`token_${provider}`];
     if (typeof slot === 'string' && slot) tokens[provider] = slot;
   });
+  // 注册表优先：快照里的 providers 数组就是数据目录那份 ai_providers.json。
+  registry = registryFromConfig(config.providers);
+  if (registry.length > 0) {
+    registry.forEach(entry => {
+      if (entry.endpoint) endpoints[entry.id] = entry.endpoint;
+      if (entry.model) models[entry.id] = entry.model;
+      if (entry.token) tokens[entry.id] = entry.token;
+    });
+    rebuildProviderMenu();
+    if (!registry.some(entry => entry.id === currentProvider)) currentProvider = registry[0].id;
+  }
   const token = document.getElementById('aiToken') as HTMLInputElement | null;
   if (token) token.value = tokens[currentProvider] ?? '';
   applyDropdownValue('aiProviderBtn', 'aiProviderMenu', currentProvider);
@@ -228,6 +397,7 @@ export function applyAiConfig(config: Record<string, unknown>): void {
   const defaults = PROVIDER_DEFAULTS[currentProvider];
   const model = document.getElementById('aiModel') as HTMLInputElement | null;
   if (model && defaults) model.placeholder = defaults.model;
+  applyProviderFields(currentProvider);
   currentPromptId = typeof config.prompt_id === 'string' ? config.prompt_id : 'custom_1';
   customPrompts = {
     custom_1: typeof config.prompt_custom_1 === 'string'

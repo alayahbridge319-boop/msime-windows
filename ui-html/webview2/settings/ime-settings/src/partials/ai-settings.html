@@ -8,7 +8,7 @@
   </div>
   <div class="section ai-section">
     <div class="section-title ai-heading">API 配置</div>
-    <div class="ai-description ai-api-description">DeepSeek、OpenAI、SiliconFlow、Groq 均使用 OpenAI 兼容的 Chat Completions 接口。Custom 用于接入任意兼容服务，填写自己的接口地址与模型。每个提供商的接口地址、Token 和模型分开保存。</div>
+    <div class="ai-description ai-api-description">任意 OpenAI 兼容的 Chat Completions 接口都可以接入。下拉里选一个内置服务商，或点「添加服务商…」接入自己的兼容服务。每个服务商的接口地址、Token 和模型分开保存，模型列表可点「查询模型」从服务商拉取。</div>
     <div class="ai-grid">
       <div class="ai-field">
         <span>服务提供商</span>
@@ -22,9 +22,25 @@
             <div class="dropdown-item" data-value="openai">OpenAI</div>
             <div class="dropdown-item" data-value="siliconflow">SiliconFlow</div>
             <div class="dropdown-item" data-value="groq">Groq</div>
+            <div class="dropdown-item" data-value="minimax">MiniMax</div>
+            <div class="dropdown-item" data-value="moonshot">Moonshot（Kimi）</div>
+            <div class="dropdown-item" data-value="zhipu">智谱 GLM</div>
+            <div class="dropdown-item" data-value="dashscope">通义千问</div>
+            <div class="dropdown-item" data-value="volcengine">火山方舟（豆包）</div>
+            <div class="dropdown-item" data-value="openrouter">OpenRouter</div>
             <div class="dropdown-item" data-value="custom">Custom</div>
           </div>
         </div>
+      </div>
+      <div class="ai-field ai-provider-manage">
+        <span id="aiProviderSyncStatus" class="credential-test-status" role="status" aria-live="polite"></span>
+        <button id="aiProviderAddButton" class="credential-test-button" type="button" title="添加一个任意的 OpenAI 兼容服务商">添加服务商</button>
+        <button id="aiProviderDeleteButton" class="credential-test-button" type="button" title="删除当前选中的服务商">删除当前</button>
+      </div>
+      <div class="ai-field ai-provider-add" id="aiProviderAddForm" hidden>
+        <label><span>名称</span><input id="aiProviderAddName" type="text" placeholder="MiniMax" autocomplete="off" spellcheck="false"></label>
+        <label class="ai-wide"><span>新服务商的接口地址</span><input id="aiProviderAddEndpoint" type="url" placeholder="https://api.example.com/v1/chat/completions" autocomplete="off" spellcheck="false"></label>
+        <button id="aiProviderAddConfirm" class="credential-test-button" type="button">确定添加</button>
       </div>
       <div class="ai-field">
         <span>模型</span>
@@ -48,7 +64,7 @@
         <span id="aiModelFetchStatus" class="ai-model-fetch-status" role="status" aria-live="polite"></span>
       </div>
       <div class="ai-field">
-        <label for="aiToken">API Token</label>
+        <label for="aiToken" id="aiTokenLabel">API Token</label>
         <span class="ai-secret-input">
           <input id="aiToken" type="password" autocomplete="off" spellcheck="false">
           <button id="aiTokenVisibility" class="ai-secret-toggle" type="button" aria-label="显示 API Token" aria-pressed="false" title="显示 API Token">
@@ -81,7 +97,7 @@
         </div>
         <span class="ai-description">开启后候选更准，但要多等几秒到几十秒。</span>
       </div>
-      <label class="ai-wide"><span>接口地址</span><input id="aiEndpoint" type="url" autocomplete="off" spellcheck="false"></label>
+      <label class="ai-wide"><span id="aiEndpointLabel">接口地址</span><input id="aiEndpoint" type="url" autocomplete="off" spellcheck="false"></label>
     </div>
   </div>
   <div class="section ai-section">

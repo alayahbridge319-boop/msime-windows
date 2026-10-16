@@ -1,12 +1,17 @@
 import { serializeHostMessage } from '../../../../shared/messages';
 import { onHostMessage } from '../utils/host-messages';
 
-export type ModelListService = 'ai.assistant';
+export type ModelListService = 'ai.assistant' | 'voice.asr' | 'voice.polish';
 
 export interface ModelFetchOptions {
   buttonId: string;
   statusId: string;
+  /** dropdown-menu（结果渲染成菜单项）或 datalist（结果渲染成 option，供 input 引用）。 */
   menuId: string;
+  /** menu 元素的真实标签：默认 div.dropdown-menu，datalist 模式传 'datalist'。 */
+  menuTag?: 'div' | 'datalist';
+  /** datalist 模式下拉取成功后自动填入这个输入框（当前为空时取第一个模型）。 */
+  autofillInputId?: string;
   service: () => ModelListService;
   readConfig: () => Record<string, string>;
 }
@@ -50,6 +55,14 @@ export function setupModelFetch(options: ModelFetchOptions): () => void {
     }
 
     setStatus(status, `获取到 ${models.length} 个模型`, 'success');
+    if (menu.tagName === 'DATALIST') {
+      // datalist 模式（语音页）：模型成为输入框的可选项，空着时取第一个省一次手输。
+      if (options.autofillInputId) {
+        const input = document.getElementById(options.autofillInputId) as HTMLInputElement | null;
+        if (input && !input.value.trim()) input.value = models[0];
+      }
+      return;
+    }
     document.querySelectorAll('.dropdown-menu.open').forEach(openMenu => {
       if (openMenu !== menu) openMenu.classList.remove('open');
     });
@@ -80,6 +93,15 @@ export function setupModelFetch(options: ModelFetchOptions): () => void {
 }
 
 function renderModels(menu: HTMLElement, models: string[]): void {
+  // 用 tagName 判断而不是 instanceof HTMLDataListElement：单测的 DOM 桩没有那个全局类。
+  if (menu.tagName === 'DATALIST') {
+    menu.replaceChildren(...models.map(model => {
+      const option = document.createElement('option');
+      option.value = model;
+      return option;
+    }));
+    return;
+  }
   menu.replaceChildren(...models.map(model => {
     const item = document.createElement('div');
     item.className = 'dropdown-item';

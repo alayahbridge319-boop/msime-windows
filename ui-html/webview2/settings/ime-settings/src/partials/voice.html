@@ -53,6 +53,8 @@
             <div class="dropdown-item" data-value="openai">OpenAI</div>
             <div class="dropdown-item" data-value="siliconflow">SiliconFlow</div>
             <div class="dropdown-item" data-value="groq">Groq</div>
+            <div class="dropdown-item" data-value="zhipu">智谱 GLM</div>
+            <div class="dropdown-item" data-value="minimax">MiniMax</div>
           </div>
         </div>
       </div>
@@ -70,7 +72,7 @@
         </div>
       </div>
       <label id="voiceAsrAppKeyField"><span>App ID / App Key</span><input id="voiceAsrAppKey" type="text" autocomplete="off"></label>
-      <label id="voiceAsrModelField"><span>模型</span><input id="voiceAsrModel" type="text" autocomplete="off" spellcheck="false" placeholder="whisper-1"></label>
+      <label id="voiceAsrModelField"><span>模型</span><input id="voiceAsrModel" type="text" list="voiceAsrModelOptions" autocomplete="off" spellcheck="false" placeholder="whisper-1"><datalist id="voiceAsrModelOptions"></datalist></label>
       <div class="voice-field voice-wide">
         <label for="voiceAsrToken">Access Token / API Key</label>
         <span class="voice-secret-input">
@@ -96,6 +98,8 @@
       </div>
     </div>
     <div class="credential-test-row">
+      <button id="voiceAsrModelFetchButton" class="credential-test-button" type="button" title="按当前接口地址和 Token 查询可用模型">查询模型</button>
+      <span id="voiceAsrModelFetchStatus" class="credential-test-status" role="status" aria-live="polite"></span>
       <button id="voiceAsrTestButton" class="credential-test-button" type="button">测试配置</button>
       <span id="voiceAsrTestStatus" class="credential-test-status" role="status" aria-live="polite"></span>
     </div>
@@ -139,10 +143,16 @@
             <div class="dropdown-item" data-value="openai">OpenAI</div>
             <div class="dropdown-item" data-value="deepseek">DeepSeek</div>
             <div class="dropdown-item" data-value="groq">Groq</div>
+            <div class="dropdown-item" data-value="minimax">MiniMax</div>
+            <div class="dropdown-item" data-value="moonshot">Moonshot（Kimi）</div>
+            <div class="dropdown-item" data-value="zhipu">智谱 GLM</div>
+            <div class="dropdown-item" data-value="dashscope">通义千问</div>
+            <div class="dropdown-item" data-value="volcengine">火山方舟（豆包）</div>
+            <div class="dropdown-item" data-value="openrouter">OpenRouter</div>
           </div>
         </div>
       </div>
-      <label><span>模型</span><input id="voicePolishModel" type="text" autocomplete="off" spellcheck="false" placeholder="Qwen/Qwen3-8B"></label>
+      <label><span>模型</span><input id="voicePolishModel" type="text" list="voicePolishModelOptions" autocomplete="off" spellcheck="false" placeholder="Qwen/Qwen3-8B"><datalist id="voicePolishModelOptions"></datalist></label>
       <div class="voice-field">
         <span>思考强度</span>
         <div class="dropdown">
@@ -179,6 +189,8 @@
       <label class="voice-wide"><span>接口地址</span><input id="voicePolishEndpoint" type="url" autocomplete="off"></label>
     </div>
     <div class="credential-test-row">
+      <button id="voicePolishModelFetchButton" class="credential-test-button" type="button" title="按当前接口地址和 Token 查询可用模型">查询模型</button>
+      <span id="voicePolishModelFetchStatus" class="credential-test-status" role="status" aria-live="polite"></span>
       <button id="voicePolishTestButton" class="credential-test-button" type="button">测试配置</button>
       <span id="voicePolishTestStatus" class="credential-test-status" role="status" aria-live="polite"></span>
     </div>

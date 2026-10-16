@@ -1,6 +1,7 @@
 import { applyDropdownValue, applyToggleState, setupDropdownMenu, setupToggleButton } from './shared';
 import { updateConfig } from './config-sync';
 import { setupCredentialTest } from './credential-test';
+import { setupModelFetch } from './model-fetch';
 
 type ProviderDefaults = { endpoint: string; model: string };
 type PolishPreset = { id: string; name: string; prompt: string };
@@ -36,6 +37,18 @@ const ASR_DEFAULTS: Record<string, ProviderDefaults> = {
   groq: {
     endpoint: 'https://api.groq.com/openai/v1/audio/transcriptions',
     model: 'whisper-large-v3-turbo'
+  },
+  zhipu: {
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4/audio/transcriptions',
+    model: 'glm-asr'
+  },
+  minimax: {
+    endpoint: 'https://api.minimax.cn/v1/speech_to_text',
+    model: 'asr-1.0'
+  },
+  custom: {
+    endpoint: '',
+    model: ''
   }
 };
 
@@ -55,6 +68,34 @@ const POLISH_DEFAULTS: Record<string, ProviderDefaults> = {
   groq: {
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
     model: 'llama-3.3-70b-versatile'
+  },
+  minimax: {
+    endpoint: 'https://api.minimax.cn/v1/chat/completions',
+    model: 'MiniMax-M3.1-Flash-Preview'
+  },
+  moonshot: {
+    endpoint: 'https://api.moonshot.cn/v1/chat/completions',
+    model: 'kimi-k2-0905-preview'
+  },
+  zhipu: {
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    model: 'glm-4-flash'
+  },
+  dashscope: {
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-plus'
+  },
+  volcengine: {
+    endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+    model: 'doubao-seed-1.6-flash'
+  },
+  openrouter: {
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'openrouter/auto'
+  },
+  custom: {
+    endpoint: '',
+    model: ''
   }
 };
 
@@ -111,8 +152,11 @@ const FALLBACK_PRESETS: PolishPreset[] = [
   }
 ];
 
-const ASR_PROVIDERS = ['doubao', 'openai', 'siliconflow', 'groq'] as const;
-const POLISH_PROVIDERS = ['siliconflow', 'openai', 'deepseek', 'groq'] as const;
+const ASR_PROVIDERS = ['doubao', 'openai', 'siliconflow', 'groq', 'zhipu', 'minimax', 'custom'] as const;
+const POLISH_PROVIDERS = [
+  'siliconflow', 'openai', 'deepseek', 'groq', 'minimax', 'moonshot', 'zhipu', 'dashscope',
+  'volcengine', 'openrouter', 'custom'
+] as const;
 
 let asrTokens: Record<string, string> = {};
 let polishTokens: Record<string, string> = {};
@@ -361,6 +405,24 @@ export function setupVoiceInput(): void {
   setupTokenVisibilityToggle('voicePolishToken', 'voicePolishTokenVisibility', 'API Token');
   setupCredentialTest('voiceAsrTestButton', 'voiceAsrTestStatus', () => 'voice.asr', asrTestConfig);
   setupCredentialTest('voicePolishTestButton', 'voicePolishTestStatus', () => 'voice.polish', polishTestConfig);
+  // 语音两页的模型也能从服务商拉：ASR 清单来自同一个 /models 端点，拉回来灌进
+  // 模型输入框的 datalist；润色页同理。custom 槽也支持——地址和 key 填好就能查。
+  setupModelFetch({
+    buttonId: 'voiceAsrModelFetchButton',
+    statusId: 'voiceAsrModelFetchStatus',
+    menuId: 'voiceAsrModelOptions',
+    autofillInputId: 'voiceAsrModel',
+    service: () => 'voice.asr',
+    readConfig: asrTestConfig
+  });
+  setupModelFetch({
+    buttonId: 'voicePolishModelFetchButton',
+    statusId: 'voicePolishModelFetchStatus',
+    menuId: 'voicePolishModelOptions',
+    autofillInputId: 'voicePolishModel',
+    service: () => 'voice.polish',
+    readConfig: polishTestConfig
+  });
   setupToggleButton('voiceSoundEnabled', value => {
     applyToggleState('voiceStartSound', value);
     applyToggleState('voiceEndSound', value);
