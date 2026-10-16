@@ -249,6 +249,9 @@ std::filesystem::path g_config_path;
 namespace
 {
 std::optional<std::filesystem::file_time_type> g_config_last_write_time;
+// ai_providers.json 的修改时间。服务商注册表不在 config.toml 里，只看 config.toml 的修改时间会漏掉它的变化。
+std::optional<std::filesystem::file_time_type> g_provider_store_last_write_time;
+bool g_provider_store_seen = false;
 } // namespace
 
 namespace ime_config_detail
@@ -325,10 +328,7 @@ namespace
 {
 const std::vector<std::string_view> &AiAssistantProviders()
 {
-    static const std::vector<std::string_view> providers{"deepseek",  "openai",     "siliconflow", "groq",
-                                                         "custom",    "minimax",    "moonshot",    "zhipu",
-                                                         "dashscope", "volcengine", "openrouter"};
-    return providers;
+    return AiAssistant::ProviderStore::BuiltinProviderIds();
 }
 
 // 服务商已下线的旧默认模型。用户配置里残留这些值时按空槽位处理，跟随当前默认值。
@@ -382,6 +382,14 @@ void RememberConfigWriteTime()
     {
         g_config_last_write_time = write_time;
     }
+}
+
+void RememberProviderStoreWriteTime()
+{
+    std::error_code error;
+    const auto write_time = std::filesystem::last_write_time(AiAssistant::ProviderStore::StorePath(), error);
+    g_provider_store_last_write_time = error ? std::nullopt : std::optional(write_time);
+    g_provider_store_seen = true;
 }
 } // namespace ime_config_detail
 
@@ -884,9 +892,26 @@ bool LoadImeConfig()
         }
         PublishVoiceInput(std::move(voice));
         g_ai_assistant.enabled = tbl["ai_assistant"]["enabled"].value_or(false);
+        // The provider registry lives in the data directory (ai_providers.json) and has to be read
+        // before the active provider is validated: an id the user added there is not one of the
+        // built-in slots, and checking only those would reset it to deepseek on every load.
+        if (const auto stored = AiAssistant::ProviderStore::Load())
+        {
+            g_ai_assistant.providers = *stored;
+        }
+        else
+        {
+            g_ai_assistant.providers = AiAssistant::ProviderStore::SeedBuiltins();
+            AiAssistant::ProviderStore::Save(g_ai_assistant.providers);
+        }
+        RememberProviderStoreWriteTime();
         g_ai_assistant.provider =
             VoiceInput::NormalizeProviderId(tbl["ai_assistant"]["provider"].value_or(std::string("deepseek")));
-        if (AiAssistantTokenSlotKey(g_ai_assistant.provider).empty())
+        const auto registered = [](const std::string &id) {
+            return std::any_of(g_ai_assistant.providers.begin(), g_ai_assistant.providers.end(),
+                               [&id](const AiAssistant::AiProvider &entry) { return entry.id == id; });
+        };
+        if (AiAssistantTokenSlotKey(g_ai_assistant.provider).empty() && !registered(g_ai_assistant.provider))
             g_ai_assistant.provider = "deepseek";
         g_ai_assistant.token = tbl["ai_assistant"]["token"].value_or(std::string());
         g_ai_assistant.tokens.clear();
@@ -895,6 +920,14 @@ bool LoadImeConfig()
             const std::string id(provider);
             g_ai_assistant.tokens[id] =
                 VoiceInput::UsableToken(tbl["ai_assistant"][AiAssistantTokenSlotKey(id)].value_or(std::string()));
+        }
+        // Registry providers keep their token in config.toml as well, as token_<id>: that key is
+        // DPAPI-protected and survives template merges as a credential.
+        for (const auto &entry : g_ai_assistant.providers)
+        {
+            if (!AiAssistant::ProviderStore::IsBuiltinProvider(entry.id))
+                g_ai_assistant.tokens[entry.id] =
+                    VoiceInput::UsableToken(tbl["ai_assistant"]["token_" + entry.id].value_or(std::string()));
         }
         {
             std::string &stored = g_ai_assistant.tokens[g_ai_assistant.provider];
@@ -927,37 +960,10 @@ bool LoadImeConfig()
         }
         g_ai_assistant.endpoint = g_ai_assistant.endpoints[g_ai_assistant.provider];
         g_ai_assistant.model = g_ai_assistant.models[g_ai_assistant.provider];
-        // The provider registry lives in the data directory (ai_providers.json). On the first run
-        // it is seeded from the legacy config slots so nothing the user configured is lost; after
-        // that the registry is authoritative and overrides the legacy single fields below.
-        if (const auto stored = AiAssistant::ProviderStore::Load())
-        {
-            g_ai_assistant.providers = *stored;
-        }
-        else
-        {
-            std::vector<std::pair<std::string, std::string>> default_endpoints;
-            std::vector<std::pair<std::string, std::string>> default_models;
-            std::vector<std::pair<std::string, std::string>> legacy_endpoints;
-            std::vector<std::pair<std::string, std::string>> legacy_models;
-            std::vector<std::pair<std::string, std::string>> legacy_tokens;
-            const AiAssistantConfig defaults;
-            for (const auto provider : AiAssistantProviders())
-            {
-                const std::string id(provider);
-                default_endpoints.emplace_back(id, defaults.endpoints.at(id));
-                default_models.emplace_back(id, defaults.models.at(id));
-                legacy_endpoints.emplace_back(id, g_ai_assistant.endpoints[id]);
-                legacy_models.emplace_back(id, g_ai_assistant.models[id]);
-                legacy_tokens.emplace_back(id, g_ai_assistant.tokens[id]);
-            }
-            g_ai_assistant.providers = AiAssistant::ProviderStore::SeedFromLegacy(
-                default_endpoints, default_models, legacy_endpoints, legacy_models, legacy_tokens);
-            AiAssistant::ProviderStore::Save(g_ai_assistant.providers);
-        }
+        // Registry-only providers have no endpoint_/model_ slot that survives an upgrade; their
+        // values come from the store.
         AiAssistant::ProviderStore::ResolveActive(g_ai_assistant.active, g_ai_assistant.endpoint, g_ai_assistant.model,
-                                                  g_ai_assistant.token, g_ai_assistant.provider,
-                                                  g_ai_assistant.providers);
+                                                  g_ai_assistant.provider, g_ai_assistant.providers);
         const int ai_limit = tbl["ai_assistant"]["candidate_limit"].value_or(3);
         g_ai_assistant.candidate_limit = ai_limit >= 1 && ai_limit <= 10 ? ai_limit : 3;
         g_ai_assistant.thinking = tbl["ai_assistant"]["thinking"].value_or(std::string("disabled"));
@@ -1124,6 +1130,7 @@ SchemeType ParseScheme(const std::string &value)
 void InvalidateImeConfigWriteTime()
 {
     g_config_last_write_time.reset();
+    g_provider_store_seen = false;
 }
 
 void InitImeConfig()
@@ -1188,7 +1195,16 @@ bool ReloadImeConfigIfChanged()
 {
     std::error_code error;
     const auto write_time = std::filesystem::last_write_time(g_config_path, error);
-    if (error || (g_config_last_write_time && write_time == *g_config_last_write_time))
+    const bool config_changed = !error && !(g_config_last_write_time && write_time == *g_config_last_write_time);
+    bool store_changed = false;
+    if (!error && !config_changed && g_provider_store_seen)
+    {
+        std::error_code store_error;
+        const auto store_time = std::filesystem::last_write_time(AiAssistant::ProviderStore::StorePath(), store_error);
+        const auto current = store_error ? std::nullopt : std::optional(store_time);
+        store_changed = current != g_provider_store_last_write_time;
+    }
+    if (!config_changed && !store_changed)
     {
         return false;
     }

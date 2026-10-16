@@ -130,7 +130,7 @@ HttpResponse PerformJsonRequest(const std::string &endpoint, const std::string &
     return response;
 }
 
-// 由 Chat Completions 地址或 base URL 推出 OpenAI 兼容的 /models 地址。
+// 由 Chat Completions / 语音转写地址或 base URL 推出 OpenAI 兼容的 /models 地址。
 // 查询串（如 Azure 的 api-version）原样保留，只改写路径部分。
 std::string ModelListEndpoint(const std::string &endpoint)
 {
@@ -142,9 +142,15 @@ std::string ModelListEndpoint(const std::string &endpoint)
     const auto ends_with = [&path](std::string_view suffix) {
         return path.size() >= suffix.size() && path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
     };
-    constexpr std::string_view kChatSuffix = "/chat/completions";
-    if (ends_with(kChatSuffix))
-        path.resize(path.size() - kChatSuffix.size());
+    // MiniMax 的转写接口是 /v1/speech_to_text，其余转写服务都是 OpenAI 的 /audio/transcriptions。
+    for (const std::string_view suffix : {"/chat/completions", "/audio/transcriptions", "/speech_to_text"})
+    {
+        if (ends_with(suffix))
+        {
+            path.resize(path.size() - suffix.size());
+            break;
+        }
+    }
     if (!ends_with("/models"))
         path += "/models";
     return path + query;
@@ -160,8 +166,7 @@ ApiCredentialTest::Result TestChat(const ApiCredentialTest::Request &request)
     if (!IsHttpEndpoint(endpoint) || model.empty())
         return {false, "请填写有效的 HTTPS 接口地址和模型名。"};
     const std::string provider = Value(request, "provider");
-    const std::string payload =
-        ApiCredentialTest::detail::BuildChatProbeRequestBody(provider, model, endpoint).dump();
+    const std::string payload = ApiCredentialTest::detail::BuildChatProbeRequestBody(provider, model, endpoint).dump();
     const HttpResponse response = PerformJsonRequest(endpoint, token, &payload);
     if (response.code == CURLE_OK && response.status >= 200 && response.status < 300)
         return {true, "连接成功，API Key 和模型配置有效。"};

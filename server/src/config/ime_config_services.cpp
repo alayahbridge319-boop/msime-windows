@@ -1,13 +1,11 @@
-﻿// 在线服务配置：语音输入（识别与润色的提供商、凭证槽位、热键）、AI 助手、翻译服务（腾讯 TMT、自定义翻译、小牛翻译）
+// 在线服务配置：语音输入（识别与润色的提供商、凭证槽位、热键）、AI 助手、翻译服务（腾讯 TMT、自定义翻译、小牛翻译）
 // 和这些服务共用的网络代理。
 #include "config/ime_config_internal.h"
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
-#include <string_view>
 #include "voice-input/voice_providers.h"
 
 using namespace ime_config_detail;
@@ -221,6 +219,16 @@ const AiAssistantConfig &GetConfiguredAiAssistant()
     return g_ai_assistant;
 }
 
+static bool SaveAiProviderStore()
+{
+    if (!AiAssistant::ProviderStore::Save(g_ai_assistant.providers))
+        return false;
+    RememberProviderStoreWriteTime();
+    return true;
+}
+
+static bool ApplyAiAssistantString(const std::string &key, const std::string &value);
+
 bool SetAiAssistantProviders(const std::vector<AiAssistant::AiProvider> &entries)
 {
     if (entries.empty())
@@ -230,20 +238,31 @@ bool SetAiAssistantProviders(const std::vector<AiAssistant::AiProvider> &entries
         if (entry.id.empty())
             return false;
     }
-    if (!AiAssistant::ProviderStore::Save(entries))
-        return false;
+    const std::vector<AiAssistant::AiProvider> previous = g_ai_assistant.providers;
     g_ai_assistant.providers = entries;
+    // Tokens are edited through token_<id> and live in config.toml; whatever the page echoes
+    // back here is not stored again.
+    for (auto &entry : g_ai_assistant.providers)
+        entry.token.clear();
+    if (!SaveAiProviderStore())
+    {
+        g_ai_assistant.providers = previous;
+        return false;
+    }
     const auto active = std::find_if(entries.begin(), entries.end(),
                                      [](const auto &entry) { return entry.id == g_ai_assistant.provider; });
     if (active == entries.end())
     {
-        // The active provider was deleted: fall back to the first entry rather than leaving the
-        // request path pointed at a ghost.
-        g_ai_assistant.provider = entries.front().id;
-        WriteConfiguredValue("ai_assistant", "provider", EscapeTomlBasicString(g_ai_assistant.provider));
+        // The active provider was deleted: switch to the first entry the same way the settings
+        // page would, so its token, endpoint and model replace the deleted provider's.
+        ApplyAiAssistantString("provider", entries.front().id);
     }
-    AiAssistant::ProviderStore::ResolveActive(g_ai_assistant.active, g_ai_assistant.endpoint, g_ai_assistant.model,
-                                              g_ai_assistant.token, g_ai_assistant.provider, g_ai_assistant.providers);
+    else
+    {
+        AiAssistant::ProviderStore::ResolveActive(g_ai_assistant.active, g_ai_assistant.endpoint, g_ai_assistant.model,
+                                                  g_ai_assistant.provider, g_ai_assistant.providers);
+    }
+    PublishTranslationConfig();
     return true;
 }
 
@@ -485,20 +504,17 @@ static bool ApplyAiAssistantString(const std::string &key, const std::string &va
         const auto registered =
             std::find_if(g_ai_assistant.providers.begin(), g_ai_assistant.providers.end(),
                          [&provider](const AiAssistant::AiProvider &entry) { return entry.id == provider; });
-        // Accept the legacy five slot ids plus anything in the provider registry.
+        // Accept the built-in slot ids plus anything in the provider registry.
         if (AiAssistantTokenSlotKey(provider).empty() && registered == g_ai_assistant.providers.end())
             return false;
         const std::string previous = g_ai_assistant.provider;
-        std::string token = g_ai_assistant.tokens[provider];
+        const std::string token = g_ai_assistant.tokens[provider];
         std::string endpoint = AiAssistantEffectiveValue("endpoint", provider, g_ai_assistant.endpoints[provider]);
         std::string model = AiAssistantEffectiveValue("model", provider, g_ai_assistant.models[provider]);
-        // Registry entries only speak for registry-only providers. The five built-in slot ids
-        // stay config.toml-authoritative, so a stale store copy cannot shadow fresh slot values.
-        static const std::array<std::string_view, 5> kBuiltins{"deepseek", "openai", "siliconflow", "groq", "custom"};
-        const bool builtin = std::find(kBuiltins.begin(), kBuiltins.end(), provider) != kBuiltins.end();
-        if (registered != g_ai_assistant.providers.end() && !builtin)
+        // Registry entries only speak for registry-only providers. Built-in ids stay
+        // config.toml-authoritative, so a stale store copy cannot shadow fresh slot values.
+        if (registered != g_ai_assistant.providers.end() && !AiAssistant::ProviderStore::IsBuiltinProvider(provider))
         {
-            token = registered->token.empty() ? token : registered->token;
             endpoint = registered->endpoint.empty() ? endpoint : registered->endpoint;
             model = registered->model.empty() ? model : registered->model;
         }
@@ -518,8 +534,7 @@ static bool ApplyAiAssistantString(const std::string &key, const std::string &va
         g_ai_assistant.endpoint = endpoint;
         g_ai_assistant.model = model;
         AiAssistant::ProviderStore::ResolveActive(g_ai_assistant.active, g_ai_assistant.endpoint, g_ai_assistant.model,
-                                                  g_ai_assistant.token, g_ai_assistant.provider,
-                                                  g_ai_assistant.providers);
+                                                  g_ai_assistant.provider, g_ai_assistant.providers);
         return true;
     }
     if (key == "endpoint" || key == "model")
@@ -533,19 +548,17 @@ static bool ApplyAiAssistantString(const std::string &key, const std::string &va
         auto &slots = key == "endpoint" ? g_ai_assistant.endpoints : g_ai_assistant.models;
         slots[g_ai_assistant.provider] = effective;
         (key == "endpoint" ? g_ai_assistant.endpoint : g_ai_assistant.model) = effective;
-        // Keep the registry entry behind the active provider in step, so the settings page,
-        // the request path and a later rollback all see the same value.
+        // A registry-only provider's endpoint/model live in the store (its config.toml slot does
+        // not survive an upgrade), so keep that entry in step. Built-in ids are config-authoritative.
         const auto active =
             std::find_if(g_ai_assistant.providers.begin(), g_ai_assistant.providers.end(),
                          [](const AiAssistant::AiProvider &entry) { return entry.id == g_ai_assistant.provider; });
-        if (active != g_ai_assistant.providers.end())
+        if (active != g_ai_assistant.providers.end() &&
+            !AiAssistant::ProviderStore::IsBuiltinProvider(g_ai_assistant.provider))
         {
             (key == "endpoint" ? active->endpoint : active->model) = effective;
-            if (key == "endpoint")
-                g_ai_assistant.active.endpoint = effective;
-            else
-                g_ai_assistant.active.model = effective;
-            AiAssistant::ProviderStore::Save(g_ai_assistant.providers);
+            (key == "endpoint" ? g_ai_assistant.active.endpoint : g_ai_assistant.active.model) = effective;
+            SaveAiProviderStore();
         }
         return true;
     }
@@ -560,21 +573,16 @@ static bool ApplyAiAssistantString(const std::string &key, const std::string &va
     {
         const std::string provider = key.substr(std::string("token_").size());
         const std::string id = VoiceInput::NormalizeProviderId(provider);
-        // Legacy slots stay as config keys; registry providers keep the token in the store.
+        // Every provider's token is a config.toml credential (token_<id>, DPAPI-protected), the
+        // registry ones included; the store never holds tokens.
         const auto registered = std::find_if(g_ai_assistant.providers.begin(), g_ai_assistant.providers.end(),
                                              [&id](const AiAssistant::AiProvider &entry) { return entry.id == id; });
-        if (AiAssistantTokenSlotKey(provider) != key && registered == g_ai_assistant.providers.end())
+        if (AiAssistantTokenSlotKey(provider) != key &&
+            (registered == g_ai_assistant.providers.end() || provider != id))
             return false;
         if (!WriteConfiguredValue("ai_assistant", key, EscapeTomlBasicString(value)))
             return false;
         g_ai_assistant.tokens[id] = value;
-        if (registered != g_ai_assistant.providers.end())
-        {
-            registered->token = value;
-            if (g_ai_assistant.provider == id)
-                g_ai_assistant.active.token = value;
-            AiAssistant::ProviderStore::Save(g_ai_assistant.providers);
-        }
         if (g_ai_assistant.provider == id)
             persist("token", value, g_ai_assistant.token);
         return true;

@@ -51,12 +51,13 @@ export function sendProviderSync(entries: RegistryEntry[], status: HTMLElement |
   });
 }
 
-// Mirrors the server's slug rule closely enough for the UI: lowercase ASCII, separators become
-// dashes, collisions get a numeric suffix. The server keeps the authoritative version.
-export function makeProviderId(name: string, existing: RegistryEntry[]): string {
+// The id of a new entry: lowercase ASCII, separators become dashes, collisions get a numeric
+// suffix. It doubles as the token_<id> key in config.toml. Built-in ids are reserved even after
+// their entry was removed: the server treats them as config.toml slots, not registry entries.
+export function makeProviderId(name: string, existing: RegistryEntry[], reserved: readonly string[]): string {
   const slug = (name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') ||
     'provider');
-  const taken = new Set(existing.map(entry => entry.id));
+  const taken = new Set([...existing.map(entry => entry.id), ...reserved]);
   if (!taken.has(slug)) return slug;
   for (let suffix = 2; ; suffix++) {
     const candidate = `${slug}-${suffix}`;

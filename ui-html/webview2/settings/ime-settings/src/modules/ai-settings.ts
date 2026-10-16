@@ -92,7 +92,9 @@ function applyProviderFields(provider: string): void {
 
 // 内置槽位的显示名。注册表条目用条目自己的 name。
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  deepseek: 'DeepSeek', openai: 'OpenAI', siliconflow: 'SiliconFlow', groq: 'Groq', custom: 'Custom'
+  deepseek: 'DeepSeek', openai: 'OpenAI', siliconflow: 'SiliconFlow', groq: 'Groq', minimax: 'MiniMax',
+  moonshot: 'Moonshot（Kimi）', zhipu: '智谱 GLM', dashscope: '通义千问', volcengine: '火山方舟（豆包）',
+  openrouter: 'OpenRouter', custom: 'Custom'
 };
 
 function defaults_display_name(provider: string): string {
@@ -229,12 +231,12 @@ function setupProviderManagement(): void {
     if (!name || !/^https?:\/\//.test(endpoint)) {
       const status = document.getElementById('aiProviderSyncStatus');
       if (status) {
-        status.textContent = '请填写名称和 https:// 开头的接口地址。';
+        status.textContent = '请填写名称和 http:// 或 https:// 开头的接口地址。';
         status.dataset.kind = 'error';
       }
       return;
     }
-    const entry: RegistryEntry = { id: makeProviderId(name, registry), name, endpoint, token: '', model: '' };
+    const entry: RegistryEntry = { id: makeProviderId(name, registry, PROVIDERS), name, endpoint, token: '', model: '' };
     void syncRegistry([...registry, entry]).then(ok => {
       if (!ok) return;
       if (nameInput) nameInput.value = '';

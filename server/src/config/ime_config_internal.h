@@ -289,6 +289,8 @@ std::string AiAssistantTokenSlotKey(std::string_view provider);
 // 自定义翻译、小牛翻译或 AI 辅助服务商配置的地方，改完都要调一次。
 void PublishTranslationConfig();
 void RememberConfigWriteTime();
+// 记下 ai_providers.json 当前的修改时间。本进程自己保存注册表后调用，免得把自己的写入当成外部变更重载。
+void RememberProviderStoreWriteTime();
 
 // ime_config_toml.cpp
 std::string EscapeTomlBasicString(const std::string &value);

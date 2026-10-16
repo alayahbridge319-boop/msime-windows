@@ -439,33 +439,30 @@ static nlohmann::json CustomShuangpinSchemasJson()
     return schemas;
 }
 
-// The provider registry as sent to the settings page: one entry per user-defined service. The
-// five built-in slot ids stay config.toml-authoritative, so their snapshot values come from the
-// parsed config rather than a possibly-stale store copy; registry-only entries pass through.
+// The provider registry as sent to the settings page: one entry per user-defined service. Built-in
+// ids stay config.toml-authoritative, so their endpoint/model come from the parsed config rather
+// than a possibly-stale store copy. Every token comes from config.toml; the store holds none.
 nlohmann::json ProviderEntriesJson(const AiAssistantConfig &ai)
 {
-    static const std::array<std::string_view, 5> kBuiltins{"deepseek", "openai", "siliconflow", "groq", "custom"};
     nlohmann::json array = nlohmann::json::array();
     for (const auto &entry : ai.providers)
     {
-        const bool builtin = std::find(kBuiltins.begin(), kBuiltins.end(), entry.id) != kBuiltins.end();
         nlohmann::json item = {{"id", entry.id},
                                {"name", entry.name},
                                {"endpoint", entry.endpoint},
-                               {"token", entry.token},
+                               {"token", ""},
                                {"model", entry.model}};
-        if (builtin)
+        if (AiAssistant::ProviderStore::IsBuiltinProvider(entry.id))
         {
             const auto endpoint = ai.endpoints.find(entry.id);
             const auto model = ai.models.find(entry.id);
-            const auto token = ai.tokens.find(entry.id);
             if (endpoint != ai.endpoints.end())
                 item["endpoint"] = endpoint->second;
             if (model != ai.models.end())
                 item["model"] = model->second;
-            if (token != ai.tokens.end())
-                item["token"] = token->second;
         }
+        if (const auto token = ai.tokens.find(entry.id); token != ai.tokens.end())
+            item["token"] = token->second;
         array.push_back(std::move(item));
     }
     return array;

@@ -5,8 +5,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
-#include <utility>
 
 namespace AiAssistant
 {
@@ -14,38 +14,35 @@ namespace AiAssistant
 // config.toml, whose template merge drops non-credential keys it does not know, which would
 // delete user-added providers on every upgrade. HanaAgent keeps its provider plugins out of the
 // app config for the same reason.
+//
+// Tokens are deliberately not part of the file. They stay in config.toml as token_<id>, where
+// they are DPAPI-protected and survive template merges as credential keys.
 namespace ProviderStore
 {
 using Entries = std::vector<AiProvider>;
 
-// Entries as stored. Nullopt when the file does not exist yet, so the caller can migrate the
-// legacy config slots into a first generation of entries. A present-but-corrupt file also reads
-// as nullopt: the next Save() rewrites it wholesale. An explicit path keeps tests off the real
-// data directory.
+// The provider ids with config.toml slots (endpoint_<id> / model_<id> / token_<id>). Their values
+// are config.toml-authoritative; the registry only lists them so the menu can order or hide them.
+const std::vector<std::string_view> &BuiltinProviderIds();
+bool IsBuiltinProvider(std::string_view id);
+
+// Entries as stored. Nullopt when the file does not exist yet, so the caller can seed a first
+// generation of entries. A present-but-corrupt file also reads as nullopt: the next Save()
+// rewrites it wholesale. An explicit path keeps tests off the real data directory.
 std::optional<Entries> Load(const std::filesystem::path &path = {});
 
-// Persists the whole list. Writing is atomic (tmp file + rename) so a crash never leaves a
-// half-written store behind. Returns false when the data directory is unavailable.
+// Persists the whole list, without tokens. Writing is atomic (tmp file + rename) so a crash
+// never leaves a half-written store behind. Returns false when the data directory is unavailable.
 bool Save(const Entries &entries, const std::filesystem::path &path = {});
 
 std::filesystem::path StorePath();
 
-// A stable, slug-shaped id from a display name ("MiniMax 中转" -> "minimax-"), unique among the
-// existing entries. Ids stay compatible with the legacy ai_assistant.<field>_<id> slot keys.
-std::string MakeProviderId(const std::string &name, const Entries &existing);
+// The first generation of entries: one per built-in provider, in menu order.
+Entries SeedBuiltins();
 
-// Seeds the first generation of entries from the legacy per-slot config keys. Built-in slots keep
-// their default endpoints; a slot whose legacy endpoint was overridden carries that value over,
-// so nothing the user configured is lost by the migration.
-Entries SeedFromLegacy(const std::vector<std::pair<std::string, std::string>> &default_endpoints,
-                       const std::vector<std::pair<std::string, std::string>> &default_models,
-                       const std::vector<std::pair<std::string, std::string>> &legacy_endpoints,
-                       const std::vector<std::pair<std::string, std::string>> &legacy_models,
-                       const std::vector<std::pair<std::string, std::string>> &legacy_tokens);
-
-// Copies the active provider's endpoint/model/token over the legacy single fields so the request
-// path keeps working unchanged. Unknown ids leave them as the config file had them.
-void ResolveActive(AiProvider &active_out, std::string &endpoint, std::string &model, std::string &token,
-                   const std::string &provider, const Entries &entries);
+// Copies a registry-only provider's endpoint/model over the legacy single fields so the request
+// path keeps working unchanged. Built-in and unknown ids leave them as the config file had them.
+void ResolveActive(AiProvider &active_out, std::string &endpoint, std::string &model, const std::string &provider,
+                   const Entries &entries);
 } // namespace ProviderStore
 } // namespace AiAssistant

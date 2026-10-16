@@ -123,6 +123,7 @@ std::wstring ResolveCuePath(const wchar_t *filename)
 bool StartRecording();
 void StopRecording();
 void CancelRecording();
+void DiscardRecording(const VoiceInputConfig &config);
 
 void MuteSystemAudioIfEnabled(const VoiceInputConfig &config)
 {
@@ -401,12 +402,6 @@ LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam)
     {
         if (down && !g_ralt_lock_mode)
             PostMessageW(g_message_window, kLockRecordingMessage, 0, 0);
-        return 1;
-    }
-    if (key->vkCode == VK_ESCAPE && g_recording)
-    {
-        if (down)
-            PostMessageW(g_message_window, kCancelRecordingMessage, 0, 0);
         return 1;
     }
 
@@ -1013,7 +1008,7 @@ void StopRecording()
     g_capture.stop();
     if (g_capture.callback_failed())
     {
-        CancelRecording();
+        DiscardRecording(config);
         ShowVoiceNotice(L"录音中断，请重试。");
         return;
     }
@@ -1163,6 +1158,13 @@ void CancelRecording()
     }
     const VoiceInputConfig config = GetConfiguredVoiceInput();
     g_recording = false;
+    DiscardRecording(config);
+}
+
+// g_recording 已经置为 false 之后的取消收尾。StopRecording 在录音回调失败时也走这里：
+// 那时 g_recording 已清掉，再调 CancelRecording 只会进上面的早退分支，系统静音和豆包连接都收不掉。
+void DiscardRecording(const VoiceInputConfig &config)
+{
     {
         std::lock_guard<std::mutex> send_lock(g_send_mutex);
         ++g_voice_session;
