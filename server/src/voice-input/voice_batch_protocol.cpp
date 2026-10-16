@@ -35,16 +35,19 @@ std::string BuildBatchPolish(const std::string &text, const VoiceInputConfig &co
 {
     auto body = nlohmann::json::parse(metasequoia::voice::make_polish_request(
         ResolvePolishModel(config), ResolvePolishSystemPrompt(config), WrapAsrUserMessage(text)));
-    if (config.polish_provider == "siliconflow")
+    // Same rule as the AI assistant: vendor fields follow the endpoint that will be called, so a
+    // slot labelled "siliconflow" but pointing at another service is not sent enable_thinking.
+    const auto vendor = VendorForRequest(config.polish_provider, config.polish_endpoint);
+    if (vendor == ChatVendor::SiliconFlow)
     {
         body["enable_thinking"] = false;
     }
-    else if (UsesDeepSeekThinking(config.polish_provider, config.polish_thinking))
+    else if (UsesDeepSeekThinking(config.polish_provider, config.polish_endpoint, config.polish_thinking))
     {
         body["thinking"] = {{"type", "enabled"}};
         body["reasoning_effort"] = config.polish_thinking;
     }
-    else if (config.polish_provider == "deepseek")
+    else if (vendor == ChatVendor::DeepSeek)
     {
         body["thinking"] = {{"type", "disabled"}};
     }

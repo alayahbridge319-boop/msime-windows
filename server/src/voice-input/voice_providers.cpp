@@ -79,6 +79,68 @@ bool UsesDeepSeekThinking(std::string_view provider, std::string_view level)
     return NormalizeProviderId(provider) == "deepseek" && IsValidThinkingLevel(level) && level != "disabled";
 }
 
+ChatVendor VendorFromChatEndpoint(std::string_view endpoint)
+{
+    // scheme://[user[:pass]@]host[:port]/path - only the host identifies the vendor.
+    const size_t scheme = endpoint.find("://");
+    if (scheme == std::string_view::npos)
+        return ChatVendor::Other;
+    std::string_view rest = endpoint.substr(scheme + 3);
+    const size_t path = rest.find('/');
+    if (path != std::string_view::npos)
+        rest = rest.substr(0, path);
+    const size_t at = rest.rfind('@');
+    if (at != std::string_view::npos)
+        rest = rest.substr(at + 1);
+    const size_t colon = rest.find(':');
+    if (colon != std::string_view::npos)
+        rest = rest.substr(0, colon);
+    const std::string host = Lower(rest);
+    const auto owned_by = [&host](std::string_view domain) {
+        return host == domain ||
+               (host.size() > domain.size() && host.compare(host.size() - domain.size(), domain.size(), domain) == 0 &&
+                host[host.size() - domain.size() - 1] == '.');
+    };
+    if (owned_by("deepseek.com"))
+        return ChatVendor::DeepSeek;
+    if (owned_by("siliconflow.cn"))
+        return ChatVendor::SiliconFlow;
+    if (owned_by("groq.com"))
+        return ChatVendor::Groq;
+    if (owned_by("openai.com"))
+        return ChatVendor::OpenAI;
+    return ChatVendor::Other;
+}
+
+ChatVendor VendorForRequest(std::string_view provider, std::string_view endpoint)
+{
+    const ChatVendor actual = VendorFromChatEndpoint(endpoint);
+    if (actual != ChatVendor::Other)
+        return actual;
+    // An unrecognised host is still an answer: it means "some other OpenAI-compatible service",
+    // and vendor fields must stay off. Only a missing endpoint leaves nothing to judge by, so
+    // that is the single case where the label is allowed to speak.
+    const bool has_endpoint = endpoint.find("://") != std::string_view::npos;
+    if (has_endpoint)
+        return ChatVendor::Other;
+    const std::string id = NormalizeProviderId(provider);
+    if (id == "deepseek")
+        return ChatVendor::DeepSeek;
+    if (id == "siliconflow")
+        return ChatVendor::SiliconFlow;
+    if (id == "groq")
+        return ChatVendor::Groq;
+    if (id == "openai")
+        return ChatVendor::OpenAI;
+    return ChatVendor::Other;
+}
+
+bool UsesDeepSeekThinking(std::string_view provider, std::string_view endpoint, std::string_view level)
+{
+    return VendorForRequest(provider, endpoint) == ChatVendor::DeepSeek && IsValidThinkingLevel(level) &&
+           level != "disabled";
+}
+
 std::string NormalizeDoubaoAuthMode(std::string_view mode, std::string_view app_key)
 {
     const std::string id = Lower(mode);
@@ -125,13 +187,16 @@ std::string LookupToken(const std::map<std::string, std::string> &tokens, std::s
 
 const std::vector<std::string_view> &AsrProviders()
 {
-    static const std::vector<std::string_view> kProviders{"doubao", "openai", "siliconflow", "groq"};
+    static const std::vector<std::string_view> kProviders{"doubao", "openai",  "siliconflow", "groq",
+                                                          "zhipu",  "minimax", "custom"};
     return kProviders;
 }
 
 const std::vector<std::string_view> &PolishProviders()
 {
-    static const std::vector<std::string_view> kProviders{"siliconflow", "openai", "deepseek", "groq"};
+    static const std::vector<std::string_view> kProviders{"siliconflow", "openai",     "deepseek", "groq",
+                                                          "minimax",     "moonshot",   "zhipu",    "dashscope",
+                                                          "volcengine",  "openrouter", "custom"};
     return kProviders;
 }
 
@@ -170,10 +235,16 @@ std::string ResolvePolishToken(const VoiceInputConfig &config)
 std::string DefaultAsrEndpoint(std::string_view provider)
 {
     const std::string id = Lower(provider);
+    if (id == "custom")
+        return {};
     if (id == "openai")
         return "https://api.openai.com/v1/audio/transcriptions";
     if (id == "groq")
         return "https://api.groq.com/openai/v1/audio/transcriptions";
+    if (id == "zhipu")
+        return "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions";
+    if (id == "minimax")
+        return "https://api.minimax.cn/v1/speech_to_text";
     if (id == "doubao")
         return "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
     return "https://api.siliconflow.cn/v1/audio/transcriptions";
@@ -182,10 +253,16 @@ std::string DefaultAsrEndpoint(std::string_view provider)
 std::string DefaultAsrModel(std::string_view provider)
 {
     const std::string id = Lower(provider);
+    if (id == "custom")
+        return {};
     if (id == "openai")
         return "whisper-1";
     if (id == "groq")
         return "whisper-large-v3-turbo";
+    if (id == "zhipu")
+        return "glm-asr";
+    if (id == "minimax")
+        return "asr-1.0";
     if (id == "doubao")
         return {};
     return "FunAudioLLM/SenseVoiceSmall";
@@ -194,24 +271,52 @@ std::string DefaultAsrModel(std::string_view provider)
 std::string DefaultPolishEndpoint(std::string_view provider)
 {
     const std::string id = Lower(provider);
+    if (id == "custom")
+        return {};
     if (id == "openai")
         return "https://api.openai.com/v1/chat/completions";
     if (id == "deepseek")
         return "https://api.deepseek.com/chat/completions";
     if (id == "groq")
         return "https://api.groq.com/openai/v1/chat/completions";
+    if (id == "minimax")
+        return "https://api.minimax.cn/v1/chat/completions";
+    if (id == "moonshot")
+        return "https://api.moonshot.cn/v1/chat/completions";
+    if (id == "zhipu")
+        return "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+    if (id == "dashscope")
+        return "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    if (id == "volcengine")
+        return "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+    if (id == "openrouter")
+        return "https://openrouter.ai/api/v1/chat/completions";
     return "https://api.siliconflow.cn/v1/chat/completions";
 }
 
 std::string DefaultPolishModel(std::string_view provider)
 {
     const std::string id = Lower(provider);
+    if (id == "custom")
+        return {};
     if (id == "openai")
         return "gpt-4o-mini";
     if (id == "deepseek")
         return "deepseek-v4-flash";
     if (id == "groq")
         return "llama-3.3-70b-versatile";
+    if (id == "minimax")
+        return "MiniMax-M3.1-Flash-Preview";
+    if (id == "moonshot")
+        return "kimi-k2-0905-preview";
+    if (id == "zhipu")
+        return "glm-4-flash";
+    if (id == "dashscope")
+        return "qwen-plus";
+    if (id == "volcengine")
+        return "doubao-seed-1.6-flash";
+    if (id == "openrouter")
+        return "openrouter/auto";
     return "Qwen/Qwen3-8B";
 }
 

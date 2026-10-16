@@ -5,6 +5,7 @@
 #include "cloud/tencent_tmt.h"
 #include "cloud/translation_gloss.h"
 #include "voice-input/doubao_asr_client.h"
+#include "voice-input/voice_providers.h"
 
 #include "utils/network_proxy.h"
 #include <curl/curl.h>
@@ -159,10 +160,13 @@ ApiCredentialTest::Result TestChat(const ApiCredentialTest::Request &request)
                            {"stream", false},
                            {"max_tokens", 1},
                            {"messages", {{{"role", "user"}, {"content", "Reply OK"}}}}};
-    const std::string provider = Value(request, "provider");
-    if (provider == "deepseek")
+    // Vendor fields follow the endpoint, not the label: the DeepSeek slot can hold any
+    // OpenAI-compatible service, and thinking.type makes services that do not accept it
+    // (MiniMax among them) reject the request instead of answering it.
+    const auto vendor = VoiceInput::VendorForRequest(Value(request, "provider"), endpoint);
+    if (vendor == VoiceInput::ChatVendor::DeepSeek)
         body["thinking"] = {{"type", "disabled"}};
-    else if (provider == "siliconflow")
+    else if (vendor == VoiceInput::ChatVendor::SiliconFlow)
         body["enable_thinking"] = false;
     const std::string payload = body.dump();
     const HttpResponse response = PerformJsonRequest(endpoint, token, &payload);
@@ -314,7 +318,9 @@ Result Run(const Request &request)
 
 ModelListResult FetchModels(const Request &request)
 {
-    if (request.service != "ai.assistant")
+    // 语音转写和润色页的「查询模型」走同一条路：模型清单端点只依赖 Token 和接口地址，
+    // 与服务类型无关。
+    if (request.service != "ai.assistant" && request.service != "voice.asr" && request.service != "voice.polish")
         return {false, "不支持的模型列表类型。", {}};
     const std::string token = Value(request, "token");
     const std::string endpoint = Value(request, "endpoint");
