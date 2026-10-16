@@ -291,7 +291,9 @@ namespace
 {
 const std::vector<std::string_view> &AiAssistantProviders()
 {
-    static const std::vector<std::string_view> providers{"deepseek", "openai", "siliconflow", "groq", "custom"};
+    static const std::vector<std::string_view> providers{"deepseek",  "openai",     "siliconflow", "groq",
+                                                         "custom",    "minimax",    "moonshot",    "zhipu",
+                                                         "dashscope", "volcengine", "openrouter"};
     return providers;
 }
 
@@ -860,6 +862,37 @@ bool LoadImeConfig()
         }
         g_ai_assistant.endpoint = g_ai_assistant.endpoints[g_ai_assistant.provider];
         g_ai_assistant.model = g_ai_assistant.models[g_ai_assistant.provider];
+        // The provider registry lives in the data directory (ai_providers.json). On the first run
+        // it is seeded from the legacy config slots so nothing the user configured is lost; after
+        // that the registry is authoritative and overrides the legacy single fields below.
+        if (const auto stored = AiAssistant::ProviderStore::Load())
+        {
+            g_ai_assistant.providers = *stored;
+        }
+        else
+        {
+            std::vector<std::pair<std::string, std::string>> default_endpoints;
+            std::vector<std::pair<std::string, std::string>> default_models;
+            std::vector<std::pair<std::string, std::string>> legacy_endpoints;
+            std::vector<std::pair<std::string, std::string>> legacy_models;
+            std::vector<std::pair<std::string, std::string>> legacy_tokens;
+            const AiAssistantConfig defaults;
+            for (const auto provider : AiAssistantProviders())
+            {
+                const std::string id(provider);
+                default_endpoints.emplace_back(id, defaults.endpoints.at(id));
+                default_models.emplace_back(id, defaults.models.at(id));
+                legacy_endpoints.emplace_back(id, g_ai_assistant.endpoints[id]);
+                legacy_models.emplace_back(id, g_ai_assistant.models[id]);
+                legacy_tokens.emplace_back(id, g_ai_assistant.tokens[id]);
+            }
+            g_ai_assistant.providers = AiAssistant::ProviderStore::SeedFromLegacy(
+                default_endpoints, default_models, legacy_endpoints, legacy_models, legacy_tokens);
+            AiAssistant::ProviderStore::Save(g_ai_assistant.providers);
+        }
+        AiAssistant::ProviderStore::ResolveActive(g_ai_assistant.active, g_ai_assistant.endpoint, g_ai_assistant.model,
+                                                  g_ai_assistant.token, g_ai_assistant.provider,
+                                                  g_ai_assistant.providers);
         const int ai_limit = tbl["ai_assistant"]["candidate_limit"].value_or(3);
         g_ai_assistant.candidate_limit = ai_limit >= 1 && ai_limit <= 10 ? ai_limit : 3;
         g_ai_assistant.thinking = tbl["ai_assistant"]["thinking"].value_or(std::string("disabled"));

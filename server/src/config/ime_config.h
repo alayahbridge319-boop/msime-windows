@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ai/ai_provider_store.h"
 #include "engine/core/fuzzy_pinyin_options.h"
 #include "engine/core/scheme_type.h"
 #include "engine/shuangpin/shuangpin_profile.h"
@@ -64,23 +65,42 @@ struct VoiceInputConfig
 struct AiAssistantConfig
 {
     bool enabled = false;
-    // deepseek | openai | siliconflow | groq | custom (all use Chat Completions)
+    // Active provider id. The legacy set is deepseek | openai | siliconflow | groq | custom; ids
+    // beyond that come from the provider registry in the data directory.
     std::string provider = "deepseek";
     std::string token;
     std::map<std::string, std::string> tokens;
     std::string endpoint = "https://api.deepseek.com/chat/completions";
     std::string model = "deepseek-v4-flash";
-    std::map<std::string, std::string> endpoints{{"deepseek", "https://api.deepseek.com/chat/completions"},
-                                                 {"openai", "https://api.openai.com/v1/chat/completions"},
-                                                 {"siliconflow", "https://api.siliconflow.cn/v1/chat/completions"},
-                                                 {"groq", "https://api.groq.com/openai/v1/chat/completions"},
-                                                 {"custom", ""}};
+    // The provider registry (ai_providers.json in the data dir): any number of user-defined
+    // OpenAI-compatible services, HanaAgent-style. The legacy maps below keep the config.toml
+    // slots alive for rollback; requests resolve through `active`.
+    std::vector<AiAssistant::AiProvider> providers;
+    AiAssistant::AiProvider active;
+    std::map<std::string, std::string> endpoints{
+        {"deepseek", "https://api.deepseek.com/chat/completions"},
+        {"openai", "https://api.openai.com/v1/chat/completions"},
+        {"siliconflow", "https://api.siliconflow.cn/v1/chat/completions"},
+        {"groq", "https://api.groq.com/openai/v1/chat/completions"},
+        {"minimax", "https://api.minimax.cn/v1/chat/completions"},
+        {"moonshot", "https://api.moonshot.cn/v1/chat/completions"},
+        {"zhipu", "https://open.bigmodel.cn/api/paas/v4/chat/completions"},
+        {"dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"},
+        {"volcengine", "https://ark.cn-beijing.volces.com/api/v3/chat/completions"},
+        {"openrouter", "https://openrouter.ai/api/v1/chat/completions"},
+        {"custom", ""}};
     // Groq 已弃用 llama-3.3-70b-versatile，默认模型改用 qwen/qwen3.8-27b。
     // custom 槽位不预设接口地址和模型，全部由用户填写并单独保存。
     std::map<std::string, std::string> models{{"deepseek", "deepseek-v4-flash"},
                                               {"openai", "gpt-4o-mini"},
                                               {"siliconflow", "Qwen/Qwen3-8B"},
                                               {"groq", "qwen/qwen3.8-27b"},
+                                              {"minimax", "MiniMax-M3.1-Flash-Preview"},
+                                              {"moonshot", "kimi-k2-0905-preview"},
+                                              {"zhipu", "glm-4-flash"},
+                                              {"dashscope", "qwen-plus"},
+                                              {"volcengine", "doubao-seed-1.6-flash"},
+                                              {"openrouter", "openrouter/auto"},
                                               {"custom", ""}};
     int candidate_limit = 3;
     // DeepSeek reasoning effort: disabled | low | high | max. Other providers ignore it.
@@ -585,6 +605,10 @@ VoiceInputConfig GetConfiguredVoiceInput();
 bool SetConfiguredVoiceInputString(const std::string &key, const std::string &value);
 bool SetConfiguredVoiceInputBool(const std::string &key, bool value);
 const AiAssistantConfig &GetConfiguredAiAssistant();
+// Replaces the whole provider registry (settings page "save providers"). Persists the store,
+// keeps the active provider valid (falls back to the first entry when it disappeared) and
+// re-resolves the active endpoint/model/token.
+bool SetAiAssistantProviders(const std::vector<AiAssistant::AiProvider> &entries);
 const TencentTmtConfig &GetConfiguredTencentTmt();
 bool SetConfiguredTencentTmtString(const std::string &key, const std::string &value);
 const CustomTranslationConfig &GetConfiguredCustomTranslation();

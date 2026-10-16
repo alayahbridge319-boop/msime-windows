@@ -1,4 +1,4 @@
-set(TEST_EXECUTABLE_NAME "MetasequoiaImeServerTests")
+﻿set(TEST_EXECUTABLE_NAME "MetasequoiaImeServerTests")
 
 add_executable(test_voice_control_dispatch src/test_voice_control_dispatch.cpp
     ../src/ipc/voice_control_dispatch.cpp)
@@ -66,6 +66,9 @@ set(TEST_SOURCE_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ipc_protocol_constants.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_voice_composition_pipe.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_voice_providers.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ai_vendor.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_ai_provider_store.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_reasoning_strip.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_voice_batch_protocol.cpp"
     "${CMAKE_SOURCE_DIR}/src/voice-input/voice_batch_protocol.cpp"
     "${CMAKE_SOURCE_DIR}/src/voice-input/voice_providers.cpp"
@@ -103,6 +106,7 @@ set(TEST_SOURCE_FILES
     "${CMAKE_SOURCE_DIR}/src/statistics/stats_overview.cpp"
     "${CMAKE_SOURCE_DIR}/src/statistics/stats_store.cpp"
     "${CMAKE_SOURCE_DIR}/src/config/credential_protection.cpp"
+    "${CMAKE_SOURCE_DIR}/src/ai/ai_provider_store.cpp"
     "${CMAKE_SOURCE_DIR}/src/config/ime_config.cpp"
     "${CMAKE_SOURCE_DIR}/src/config/ime_config_credentials.cpp"
     "${CMAKE_SOURCE_DIR}/src/config/ime_config_appearance.cpp"
@@ -184,3 +188,5 @@ add_executable(test_webview_contract "${MSIME_ENGINE_DIR}/contracts/webview/test
 target_link_libraries(test_webview_contract PRIVATE Boost::json)
 add_test(NAME webview_contract COMMAND test_webview_contract
     "${MSIME_ENGINE_DIR}/contracts/webview/fixtures.json")
+
+

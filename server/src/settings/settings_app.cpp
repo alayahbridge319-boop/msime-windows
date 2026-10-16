@@ -36,6 +36,8 @@
 #include <shellapi.h>
 #include <wrl.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -396,6 +398,38 @@ static nlohmann::json CustomShuangpinSchemasJson()
     return schemas;
 }
 
+// The provider registry as sent to the settings page: one entry per user-defined service. The
+// five built-in slot ids stay config.toml-authoritative, so their snapshot values come from the
+// parsed config rather than a possibly-stale store copy; registry-only entries pass through.
+nlohmann::json ProviderEntriesJson(const AiAssistantConfig &ai)
+{
+    static const std::array<std::string_view, 5> kBuiltins{"deepseek", "openai", "siliconflow", "groq", "custom"};
+    nlohmann::json array = nlohmann::json::array();
+    for (const auto &entry : ai.providers)
+    {
+        const bool builtin = std::find(kBuiltins.begin(), kBuiltins.end(), entry.id) != kBuiltins.end();
+        nlohmann::json item = {{"id", entry.id},
+                               {"name", entry.name},
+                               {"endpoint", entry.endpoint},
+                               {"token", entry.token},
+                               {"model", entry.model}};
+        if (builtin)
+        {
+            const auto endpoint = ai.endpoints.find(entry.id);
+            const auto model = ai.models.find(entry.id);
+            const auto token = ai.tokens.find(entry.id);
+            if (endpoint != ai.endpoints.end())
+                item["endpoint"] = endpoint->second;
+            if (model != ai.models.end())
+                item["model"] = model->second;
+            if (token != ai.tokens.end())
+                item["token"] = token->second;
+        }
+        array.push_back(std::move(item));
+    }
+    return array;
+}
+
 std::wstring BuildConfigMessage(bool refresh_skin_catalog)
 {
 
@@ -694,6 +728,7 @@ std::wstring BuildConfigMessage(bool refresh_skin_catalog)
             {"model", ai.model},
             {"endpoints", ai.endpoints},
             {"models", ai.models},
+            {"providers", ProviderEntriesJson(ai)},
             {"candidate_limit", ai.candidate_limit},
             {"thinking", ai.thinking},
             {"prompt", ai.prompt},
@@ -1585,6 +1620,40 @@ void HandleWebMessage(HWND hwnd, ICoreWebView2WebMessageReceivedEventArgs *args)
                     throw std::runtime_error("Invalid API model list response");
                 auto message = string_to_wstring(json::serialize(response));
                 return [message = std::move(message)] {
+                    if (g_webview)
+                        g_webview->PostWebMessageAsJson(message.c_str());
+                };
+            });
+        }
+        else if (type == "aiProviderSync")
+        {
+            const auto &data = value.at("data").as_object();
+            const std::string request_id = json::value_to<std::string>(data.at("requestId"));
+            std::vector<AiAssistant::AiProvider> entries;
+            for (const auto &item : data.at("entries").as_array())
+            {
+                const auto &object = item.as_object();
+                AiAssistant::AiProvider entry;
+                entry.id = json::value_to<std::string>(object.at("id"));
+                entry.name = json::value_to<std::string>(object.at("name"));
+                entry.endpoint = json::value_to<std::string>(object.at("endpoint"));
+                entry.token = json::value_to<std::string>(object.at("token"));
+                entry.model = json::value_to<std::string>(object.at("model"));
+                entries.push_back(std::move(entry));
+            }
+            const bool ok = SetAiAssistantProviders(entries);
+            const std::string result_message = ok ? "已保存 " + std::to_string(entries.size()) + " 个服务商"
+                                                  : "保存失败：服务商列表为空或包含无效条目。";
+            json::value response = {{"type", "aiProviderSyncResult"},
+                                    {"requestId", request_id},
+                                    {"ok", ok},
+                                    {"message", result_message},
+                                    {"protocolVersion", metasequoia::webview::Version}};
+            if (!metasequoia::webview::Validate(response, "server"))
+                throw std::runtime_error("Invalid AI provider sync response");
+            auto message = string_to_wstring(json::serialize(response));
+            g_worker->Submit([message = std::move(message)]() -> SerialTaskQueue::Completion {
+                return [message] {
                     if (g_webview)
                         g_webview->PostWebMessageAsJson(message.c_str());
                 };
