@@ -46,6 +46,7 @@ std::mutex g_mutex;
 std::vector<float> g_samples;
 std::unique_ptr<DoubaoAsrClient> g_doubao_asr;
 std::atomic<std::size_t> g_recorded_frames{0};
+std::atomic<ULONGLONG> g_recording_started_ms{0};
 std::atomic<std::uint64_t> g_voice_session{0};
 std::atomic<std::uint64_t> g_dismissed_overlay_session{0};
 std::vector<std::future<void>> g_network_tasks;
@@ -297,6 +298,38 @@ LRESULT CALLBACK VoiceMessageWindowProc(HWND hwnd, UINT message, WPARAM wparam, 
     }
 }
 
+// 水杉是否被选为当前输入法（zh-CN 的 TSF 默认 TIP）。语音热键的激活条件：水杉
+// 是当前输入法即可——焦点在桌面/非文本窗口时 TIP 不激活（g_ime_active 为 false），
+// 但识别结果走粘贴链/暂存面板，不依赖 TSF 上下文。注册表最多每 2 秒读一次，
+// 避免低级键盘钩子每次按键都做一次注册表查询。
+bool IsWaterPineSelectedInputMethod()
+{
+    static std::atomic<ULONGLONG> last_check{0};
+    static std::atomic<bool> cached{false};
+    const ULONGLONG now = GetTickCount64();
+    if (now - last_check.load(std::memory_order_relaxed) < 2000)
+        return cached.load(std::memory_order_relaxed);
+    bool selected = false;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"SOFTWARE\\Microsoft\\CTF\\Assemblies\\0x00000804\\"
+                      L"{34745C63-B2F0-4784-8B67-5E12C8701A31}",
+                      0, KEY_READ, &key) == ERROR_SUCCESS)
+    {
+        wchar_t value[64]{};
+        DWORD size = sizeof(value);
+        DWORD type = 0;
+        if (RegQueryValueExW(key, L"Default", nullptr, &type, reinterpret_cast<LPBYTE>(value), &size) ==
+                ERROR_SUCCESS &&
+            type == REG_SZ && _wcsicmp(value, L"{E3062E9A-D834-4637-8958-ED8CFA427D01}") == 0)
+            selected = true;
+        RegCloseKey(key);
+    }
+    cached.store(selected, std::memory_order_relaxed);
+    last_check.store(now, std::memory_order_relaxed);
+    return selected;
+}
+
 LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam)
 {
     if (code != HC_ACTION)
@@ -345,7 +378,9 @@ LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam)
         return 1;
     }
 
-    if (!g_ime_active)
+    // 水杉被选为当前输入法即允许语音热键（桌面/非文本焦点时 TIP 不会激活，
+    // 但落地走粘贴链或暂存面板，不需要 TSF 上下文）。
+    if (!g_ime_active && !IsWaterPineSelectedInputMethod())
     {
         // A shortcut key-down already consumed while this TIP was active must
         // keep its matching key-up consumed, even if the user switches IMEs.
@@ -709,27 +744,68 @@ bool CopyUnicodeTextToClipboard(const std::wstring &text)
     return true;
 }
 
+// 粘贴链的并发护栏：互斥锁串行化剪贴板操作；代际号保证旧插入的剪贴板还原
+// 不会顶掉新插入的文本（Typeless 用 isInserting 锁直接丢弃并发插入，这里
+// 改成串行 + 代际守卫，连续识别不丢字）。
+std::mutex g_clipboard_paste_mutex;
+std::atomic<unsigned> g_paste_generation{0};
+
 void SendTextViaCtrlV(const std::wstring &text)
 {
-    if (!CopyUnicodeTextToClipboard(text))
+    // Typeless 同款注入链：备份剪贴板文本 -> 写入 -> Ctrl+V -> 异步恢复。
+    // Chromium 系输入框（Electron/浏览器自绘）对 TSF 直插不认账，但都完整
+    // 处理粘贴事件；剪贴板中转是这类输入框最可靠的落地方式。
+    // 局限：只备份/恢复文本格式，粘贴期间用户剪贴板里的图片等非文本内容
+    // 会被覆盖（异步恢复同样只还原文本）。
+    std::wstring saved;
+    bool had_text = false;
+    unsigned generation = 0;
     {
-        SendTextViaSendInput(text);
-        return;
+        std::lock_guard<std::mutex> lock(g_clipboard_paste_mutex);
+        generation = ++g_paste_generation;
+        if (OpenClipboard(nullptr))
+        {
+            if (IsClipboardFormatAvailable(CF_UNICODETEXT))
+            {
+                if (HANDLE data = GetClipboardData(CF_UNICODETEXT))
+                {
+                    if (const wchar_t *src = static_cast<const wchar_t *>(GlobalLock(data)))
+                    {
+                        saved = src;
+                        had_text = true;
+                        GlobalUnlock(data);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+        if (!CopyUnicodeTextToClipboard(text))
+        {
+            SendTextViaSendInput(text);
+            return;
+        }
+        // Give the focused app a brief moment to observe the new clipboard data.
+        Sleep(30);
+        INPUT inputs[4]{};
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = VK_CONTROL;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = 'V';
+        inputs[2].type = INPUT_KEYBOARD;
+        inputs[2].ki.wVk = 'V';
+        inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs[3].type = INPUT_KEYBOARD;
+        inputs[3].ki.wVk = VK_CONTROL;
+        inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(4, inputs, sizeof(INPUT));
     }
-    // Give the focused app a brief moment to observe the new clipboard data.
-    Sleep(30);
-    INPUT inputs[4]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_CONTROL;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 'V';
-    inputs[2].type = INPUT_KEYBOARD;
-    inputs[2].ki.wVk = 'V';
-    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[3].type = INPUT_KEYBOARD;
-    inputs[3].ki.wVk = VK_CONTROL;
-    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(4, inputs, sizeof(INPUT));
+    std::thread([had_text, saved, generation]() {
+        // 等目标应用把粘贴消化完再还原，太快会把正要粘的文本顶掉。
+        // 只有这之后没有新的插入才还原，否则保留最新文本。
+        Sleep(800);
+        if (g_paste_generation.load() == generation && had_text)
+            CopyUnicodeTextToClipboard(saved);
+    }).detach();
 }
 
 bool ShouldStreamInlinePreedit(const VoiceInputConfig &config)
@@ -807,44 +883,152 @@ bool SendTextViaTsf(const std::wstring &text)
     return true;
 }
 
-void CommitRecognizedText(const std::string &utf8, const VoiceInputConfig &config, bool stream_inline)
+// 识别结果必须有地方落。元素级判据，两个信号取或：
+//  1) 焦点处有 Win32 输入光标——原生编辑框、终端等；
+//  2) 焦点元素带 UIA TextEditPattern——Electron/浏览器的自绘输入框没有
+//     Win32 光标，但文本可编辑控件一定暴露这个 pattern。
+// 桌面、消息区、图片查看器等两个信号都没有，识别结果转存提示条给「复制」。
+// 注意不能用「TSF 客户端在线」当信号：它是应用级的，应用激活就在，
+// 分不清焦点在输入框里还是消息区，会把字插进虚空。
+#include <uiautomation.h>
+#pragma comment(lib, "uiautomationcore.lib")
+
+bool FocusedElementAcceptsText()
+{
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE)
+        return false;
+    bool editable = false;
+    IUIAutomation *automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))))
+    {
+        IUIAutomationElement *focused = nullptr;
+        if (SUCCEEDED(automation->GetFocusedElement(&focused)) && focused)
+        {
+            // 密码框永远不插入（Typeless 黑名单的底线）：识别结果转存暂存面板，
+            // 免得把口令念进密码框或误粘到别的输入处。
+            BOOL is_password = FALSE;
+            const bool password_field =
+                SUCCEEDED(focused->get_CurrentIsPassword(&is_password)) && is_password;
+            // Typeless 的 ContextHelper 也是这么判的：可编辑性看
+            // TextEditPattern，或 Text+Value 同现，或控件类型就是输入框。
+            IUnknown *edit_pattern = nullptr;
+            if (!password_field && SUCCEEDED(focused->GetCurrentPattern(UIA_TextEditPatternId, &edit_pattern)) &&
+                edit_pattern)
+            {
+                editable = true;
+                edit_pattern->Release();
+            }
+            if (!password_field && !editable)
+            {
+                IUnknown *text_pattern = nullptr;
+                IUnknown *value_pattern = nullptr;
+                const bool has_text =
+                    SUCCEEDED(focused->GetCurrentPattern(UIA_TextPatternId, &text_pattern)) && text_pattern;
+                const bool has_value =
+                    SUCCEEDED(focused->GetCurrentPattern(UIA_ValuePatternId, &value_pattern)) && value_pattern;
+                if (has_text)
+                    text_pattern->Release();
+                if (has_value)
+                    value_pattern->Release();
+                editable = has_text && has_value;
+            }
+            if (!password_field && !editable)
+            {
+                CONTROLTYPEID control_type = 0;
+                if (SUCCEEDED(focused->get_CurrentControlType(&control_type)) &&
+                    control_type == UIA_EditControlTypeId)
+                    editable = true;
+            }
+            focused->Release();
+        }
+        automation->Release();
+    }
+    if (SUCCEEDED(init))
+        CoUninitialize();
+    return editable;
+}
+
+bool HasNativeCaret()
+{
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground)
+        return false;
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    const DWORD thread_id = GetWindowThreadProcessId(foreground, nullptr);
+    return thread_id != 0 && GetGUIThreadInfo(thread_id, &info) && info.hwndCaret != nullptr;
+}
+
+bool HasEditableTextTarget()
+{
+    return HasNativeCaret() || FocusedElementAcceptsText();
+}
+
+// 返回 true 表示文字已暂存进提示条（未提交）；false 表示按 commit_mode 提交或已丢弃。
+bool CommitRecognizedText(const std::string &utf8, const VoiceInputConfig &config, bool stream_inline)
 {
     std::lock_guard<std::mutex> send_lock(g_send_mutex);
     const std::wstring text = string_to_wstring(utf8);
     if (text.empty())
     {
-        return;
+        return false;
     }
+    if (!HasEditableTextTarget())
+    {
+        g_overlay.set_stash_text(text);
+        g_overlay.set_stash_visible(true);
+        g_overlay.set_actions_visible(false);
+        g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
+        g_overlay.show();
+        return true;
+    }
+
+    // 自绘输入框（Electron/浏览器，无 Win32 光标）对 TSF 直插不认账——传输
+    // 成功也会被静默丢掉，所以这类焦点一律走剪贴板粘贴链；原生焦点保留
+    // TSF/SendInput 快路径，不占剪贴板。
+    const bool native_focus = HasNativeCaret();
 
     if (stream_inline)
     {
-        if (SendVoiceComposition(Global::DataFromServerMsgTypeToTsfWorkerThread::CommitVoiceComposition, text))
+        if (native_focus &&
+            SendVoiceComposition(Global::DataFromServerMsgTypeToTsfWorkerThread::CommitVoiceComposition, text))
         {
             g_last_inline_preedit.clear();
-            return;
+            return false;
         }
         SendVoiceComposition(Global::DataFromServerMsgTypeToTsfWorkerThread::CancelVoiceComposition, L"");
         g_last_inline_preedit.clear();
-        SendTextViaSendInput(text);
-        return;
+        if (native_focus)
+            SendTextViaSendInput(text);
+        else
+            SendTextViaCtrlV(text);
+        return false;
     }
 
     if (config.commit_mode == "ctrl_v")
     {
         SendTextViaCtrlV(text);
-        return;
+        return false;
     }
     if (config.commit_mode == "sendinput")
     {
         SendTextViaSendInput(text);
-        return;
+        return false;
     }
 
-    // Default / "tsf": prefer TIP insert; fall back to SendInput when no active client.
-    if (!SendTextViaTsf(text))
+    // Default / "tsf": prefer TIP insert on native focus; fall back to SendInput
+    // when no active client. Custom-drawn inputs go straight to the paste chain.
+    if (native_focus)
     {
-        SendTextViaSendInput(text);
+        if (!SendTextViaTsf(text))
+            SendTextViaSendInput(text);
     }
+    else
+    {
+        SendTextViaCtrlV(text);
+    }
+    return false;
 }
 
 void AudioCallback(const float *samples, std::size_t frames)
@@ -902,7 +1086,7 @@ bool StartRecording()
 {
     if (g_recording)
         return true;
-    if (!g_ime_active)
+    if (!g_ime_active && !IsWaterPineSelectedInputMethod())
         return false;
     if (g_abort_start.exchange(false))
         return false;
@@ -922,6 +1106,7 @@ bool StartRecording()
         g_samples.clear();
     }
     g_recorded_frames = 0;
+    g_recording_started_ms = GetTickCount64();
     std::uint64_t voice_session = 0;
     {
         std::lock_guard<std::mutex> send_lock(g_send_mutex);
@@ -930,6 +1115,7 @@ bool StartRecording()
         g_last_inline_preedit.clear();
         g_stream_inline_this_session.store(use_doubao && ShouldStreamInlinePreedit(config));
     }
+    g_overlay.set_stash_visible(false);
     g_overlay.set_show_transcript(!g_stream_inline_this_session.load());
     g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
     // 录音中就把取消/确认按钮亮出来。长按 RAlt 时松手事件可能因为切换输入法、
@@ -1042,7 +1228,13 @@ void StopRecording()
     }
     if (recorded_frames < kSampleRate / 4)
     {
-        DIAG_LOGF(L"voice: recording shorter than 0.25s ({} frames), treating as no speech", recorded_frames);
+        const ULONGLONG held_ms = GetTickCount64() - g_recording_started_ms.load();
+        DIAG_LOGF(L"voice: recording shorter than 0.25s ({} frames, held {} ms), treating as no speech", recorded_frames,
+                  held_ms);
+        // 按住很久却几乎收不到音频帧 = 麦克风没在出声（设备被占用、远程会话没
+        // 重定向麦克风等），这不该无声无息；短促点击才是真·静音，保持安静。
+        if (held_ms > 1500)
+            ShowVoiceNotice(L"没有收到麦克风声音，请检查麦克风设备或权限。", MB_ICONINFORMATION);
         {
             std::lock_guard<std::mutex> send_lock(g_send_mutex);
             ++g_voice_session;
@@ -1109,15 +1301,20 @@ void StopRecording()
             {
                 g_overlay.set_transcript(string_to_wstring(text));
             }
+            bool stashed = false;
             if (!text.empty() && g_voice_session == voice_session)
-                CommitRecognizedText(text, config, stream_inline);
-            if (!polishing && stream_inline && g_voice_session == voice_session)
+                stashed = CommitRecognizedText(text, config, stream_inline);
+            // 成功路径留痕（只记规模和去向，绝不记转写内容）：没有这行，
+            // 排查时分不清「识别成功」和「热键根本没触发」。
+            DIAG_LOGF(L"voice: recognized frames={} chars={} outcome={}", samples.size(), text.size(),
+                      text.empty() ? L"empty" : (stashed ? L"stash" : L"commit"));
+            if (!polishing && stream_inline && !stashed && g_voice_session == voice_session)
             {
                 g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
                 g_overlay.set_actions_visible(false);
                 g_overlay.hide();
             }
-            if (polishing && g_voice_session == voice_session)
+            if (polishing && !stashed && g_voice_session == voice_session)
             {
                 g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
                 g_overlay.set_actions_visible(false);
@@ -1131,7 +1328,7 @@ void StopRecording()
             }
             // Keep the finalized result visible briefly without delaying the commit.
             Sleep(recognition.error.empty() ? 160 : 1200);
-            if (g_voice_session == voice_session && !g_recording)
+            if (!stashed && g_voice_session == voice_session && !g_recording)
             {
                 g_overlay.set_compact_status(WaveOverlay::CompactStatus::None);
                 g_overlay.set_actions_visible(false);
@@ -1202,8 +1399,22 @@ bool VoiceInput::Initialize()
     curl_global_init(CURL_GLOBAL_DEFAULT);
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     if (!g_overlay.init(instance, [](WaveOverlay::Action action) {
+            if (action == WaveOverlay::Action::Copy)
+            {
+                CopyUnicodeTextToClipboard(g_overlay.stash_text());
+                g_overlay.note_stash_copied();
+                return;
+            }
             if (action == WaveOverlay::Action::Cancel)
             {
+                // 暂存面板上的 ✕ / 右键只收面板，不动录音状态；
+                // 录音中的取消走原来的会话作废路径。
+                if (!g_recording && g_overlay.stash_visible())
+                {
+                    g_overlay.set_stash_visible(false);
+                    g_overlay.hide();
+                    return;
+                }
                 if (!g_recording)
                     ++g_voice_session;
                 if (g_message_window)

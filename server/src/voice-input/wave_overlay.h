@@ -20,6 +20,7 @@ class WaveOverlay
     {
         Cancel,
         Confirm,
+        Copy,
     };
 
     WaveOverlay();
@@ -41,6 +42,12 @@ class WaveOverlay
     void set_show_transcript(bool show);
     void set_compact_status(CompactStatus status);
     void set_actions_visible(bool visible);
+    // 暂存面板：识别到文字但当前没有输入框可提交时显示（正文 + 复制按钮 + 右上角关闭）。
+    void set_stash_text(const std::wstring &text);
+    void set_stash_visible(bool visible);
+    bool stash_visible() const;
+    std::wstring stash_text() const;
+    void note_stash_copied();
 
   private:
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -55,6 +62,7 @@ class WaveOverlay
     void update_dpi_scale();
     void update_window_bounds();
     bool hit_test_action(float x, float y, Action &action) const;
+    bool hit_test_stash(float x, float y, Action &action) const;
 
   private:
     static constexpr int kLevelCount = 12;
@@ -73,6 +81,10 @@ class WaveOverlay
     Action pressed_action_ = Action::Confirm;
     bool action_pressed_ = false;
     std::function<void(Action)> action_handler_;
+    std::atomic<bool> stash_visible_{false};
+    mutable std::mutex stash_mutex_;
+    std::wstring stash_text_;
+    ULONGLONG stash_copied_until_ms_ = 0;
     std::mutex transcript_mutex_;
     std::wstring transcript_;
     float levels_[kLevelCount] = {};
@@ -90,6 +102,8 @@ class WaveOverlay
     struct IDWriteFactory *write_factory_ = nullptr;
     struct IDWriteTextFormat *text_format_ = nullptr;
     struct IDWriteTextFormat *processing_text_format_ = nullptr;
+    struct IDWriteTextFormat *stash_text_format_ = nullptr;
+    struct IDWriteTextFormat *stash_button_format_ = nullptr;
     struct IDWriteTextLayout *text_layout_ = nullptr;
     std::wstring layout_source_transcript_;
 };

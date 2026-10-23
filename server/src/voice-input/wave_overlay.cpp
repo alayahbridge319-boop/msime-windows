@@ -30,6 +30,20 @@ constexpr float kTranscriptHorizontalPadding = 14.0f;
 constexpr float kTranscriptTextTop = 33.0f;
 constexpr float kTranscriptTextBottom = 8.0f;
 constexpr UINT32 kMaxTranscriptLines = 3;
+// 暂存面板：识别到文字但没有输入框时的落地形态（参考 Typeless 的
+// 「复制最后的转录」）：标题 + 引号正文 + 底部复制按钮 + 右上角关闭。
+constexpr int kStashWidth = 420;
+constexpr int kStashHeight = 152;
+constexpr float kStashTitleTop = 12.0f;
+constexpr float kStashTitleHeight = 22.0f;
+constexpr float kStashTextTop = 42.0f;
+constexpr float kStashTextBottom = 52.0f;
+constexpr float kStashButtonWidth = 96.0f;
+constexpr float kStashButtonHeight = 32.0f;
+constexpr float kStashButtonBottom = 12.0f;
+constexpr float kStashCloseHit = 18.0f;
+constexpr float kStashCloseInset = 18.0f;
+constexpr float kStashCorner = 16.0f;
 constexpr float kPanelOpacity = 0.90f;
 constexpr int kBarCount = 12;
 constexpr float kDotRadius = 1.15f;
@@ -90,6 +104,21 @@ bool WaveOverlay::init(HINSTANCE instance, std::function<void(Action)> action_ha
         shutdown();
         return false;
     }
+    if (FAILED(write_factory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.0f, L"zh-cn",
+                                                &stash_text_format_)) ||
+        FAILED(write_factory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-cn",
+                                                &stash_button_format_)))
+    {
+        shutdown();
+        return false;
+    }
+    stash_text_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    stash_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    stash_text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    stash_button_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    stash_button_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     text_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     text_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
@@ -149,6 +178,8 @@ void WaveOverlay::shutdown()
 
     release_render_target();
     release_text_layout();
+    safe_release(&stash_button_format_);
+    safe_release(&stash_text_format_);
     safe_release(&processing_text_format_);
     safe_release(&text_format_);
     safe_release(&write_factory_);
@@ -235,6 +266,47 @@ void WaveOverlay::set_actions_visible(bool visible)
         return;
     if (hwnd_)
         PostMessageW(hwnd_, kTranscriptChangedMessage, 0, 0);
+}
+
+void WaveOverlay::set_stash_text(const std::wstring &text)
+{
+    {
+        std::lock_guard<std::mutex> lock(stash_mutex_);
+        if (stash_text_ == text)
+            return;
+        stash_text_ = text;
+    }
+    if (hwnd_)
+        PostMessageW(hwnd_, kTranscriptChangedMessage, 0, 0);
+}
+
+void WaveOverlay::set_stash_visible(bool visible)
+{
+    if (!visible)
+        stash_copied_until_ms_ = 0;
+    const bool previous = stash_visible_.exchange(visible);
+    if (previous == visible)
+        return;
+    if (hwnd_)
+        PostMessageW(hwnd_, kTranscriptChangedMessage, 0, 0);
+}
+
+bool WaveOverlay::stash_visible() const
+{
+    return stash_visible_.load();
+}
+
+std::wstring WaveOverlay::stash_text() const
+{
+    std::lock_guard<std::mutex> lock(stash_mutex_);
+    return stash_text_;
+}
+
+void WaveOverlay::note_stash_copied()
+{
+    stash_copied_until_ms_ = GetTickCount64() + 1200;
+    if (hwnd_)
+        InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 LRESULT CALLBACK WaveOverlay::wnd_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -520,12 +592,17 @@ void WaveOverlay::update_window_bounds()
     }
     const bool has_compact_status = compact_status_.load() != CompactStatus::None;
     const bool has_actions = actions_visible_.load();
+    const bool has_stash = stash_visible_.load();
     const int logical_width =
-        has_actions ? kActionWidth
-                    : (has_compact_status ? kProcessingWidth : (has_transcript ? kTranscriptWidth : kCompactWidth));
+        has_stash ? kStashWidth
+                  : (has_actions ? kActionWidth
+                                 : (has_compact_status ? kProcessingWidth
+                                                       : (has_transcript ? kTranscriptWidth : kCompactWidth)));
     const int logical_height =
-        has_actions ? kActionHeight
-                    : (has_compact_status ? kProcessingHeight : (has_transcript ? kTranscriptHeight : kCompactHeight));
+        has_stash ? kStashHeight
+                  : (has_actions ? kActionHeight
+                                 : (has_compact_status ? kProcessingHeight
+                                                       : (has_transcript ? kTranscriptHeight : kCompactHeight)));
     const int width = static_cast<int>(std::lround(logical_width * scale_x_));
     const int height = static_cast<int>(std::lround(logical_height * scale_y_));
     // 无论任务栏在哪条边，都让语音条位于“屏幕水平正中、偏底部”：
@@ -538,8 +615,35 @@ void WaveOverlay::update_window_bounds()
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 
+bool WaveOverlay::hit_test_stash(float x, float y, Action &action) const
+{
+    if (!hwnd_)
+        return false;
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    const float width = static_cast<float>(rc.right - rc.left) / scale_x_;
+    const float height = static_cast<float>(rc.bottom - rc.top) / scale_y_;
+    // 右上角关闭：整个角落都算命中，别让用户去点 6px 的叉。
+    if (x >= width - kStashCloseHit * 2.0f && y <= kStashCloseHit * 2.0f)
+    {
+        action = Action::Cancel;
+        return true;
+    }
+    const float button_top = height - kStashButtonBottom - kStashButtonHeight;
+    const float button_bottom = height - kStashButtonBottom;
+    if (x >= (width - kStashButtonWidth) * 0.5f && x <= (width + kStashButtonWidth) * 0.5f && y >= button_top &&
+        y <= button_bottom)
+    {
+        action = Action::Copy;
+        return true;
+    }
+    return false;
+}
+
 bool WaveOverlay::hit_test_action(float x, float y, Action &action) const
 {
+    if (stash_visible_.load())
+        return hit_test_stash(x, y, action);
     if (!actions_visible_.load() || !hwnd_)
         return false;
     RECT rc{};
@@ -625,6 +729,13 @@ void WaveOverlay::draw()
     const CompactStatus compact_status = compact_status_.load();
     const bool has_compact_status = compact_status != CompactStatus::None;
     const bool has_actions = actions_visible_.load();
+    const bool has_stash = stash_visible_.load();
+    std::wstring stash;
+    if (has_stash)
+    {
+        std::lock_guard<std::mutex> lock(stash_mutex_);
+        stash = stash_text_;
+    }
     const bool has_transcript = !has_compact_status && show_transcript && !transcript.empty();
     const float content_left = has_actions ? 35.0f : 0.0f;
     const float content_right = has_actions ? w - 35.0f : w;
@@ -647,10 +758,49 @@ void WaveOverlay::draw()
     render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
     render_target_->Clear(D2D1::ColorF(0, 0, 0, 0));
 
-    const float corner = (has_compact_status || has_actions) ? h * 0.5f : (has_transcript ? 16.0f : 10.0f);
+    const float corner =
+        has_stash ? kStashCorner : ((has_compact_status || has_actions) ? h * 0.5f : (has_transcript ? 16.0f : 10.0f));
     const D2D1_ROUNDED_RECT panel = D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), corner, corner);
     render_target_->FillRoundedRectangle(panel, bg_brush_);
     render_target_->DrawRoundedRectangle(panel, border_brush_, 1.0f);
+
+    if (has_stash)
+    {
+        // 标题
+        render_target_->DrawTextW(L"\u590d\u5236\u6700\u540e\u7684\u8f6c\u5f55", 7, processing_text_format_,
+                                  D2D1::RectF(0.0f, kStashTitleTop, w, kStashTitleTop + kStashTitleHeight), bar_brush_);
+        // 右上角 ✕
+        const float close_x = w - kStashCloseInset;
+        const float close_y = kStashTitleTop + kStashTitleHeight * 0.5f;
+        render_target_->DrawLine(D2D1::Point2F(close_x - 3.5f, close_y - 3.5f),
+                                 D2D1::Point2F(close_x + 3.5f, close_y + 3.5f), bar_brush_, 1.6f);
+        render_target_->DrawLine(D2D1::Point2F(close_x + 3.5f, close_y - 3.5f),
+                                 D2D1::Point2F(close_x - 3.5f, close_y + 3.5f), bar_brush_, 1.6f);
+        // 正文：引号包住、居中换行，视觉上明确是「留下来的识别结果」。
+        if (!stash.empty() && stash_text_format_)
+        {
+            const std::wstring quoted = L"\u201c" + stash + L"\u201d";
+            render_target_->DrawTextW(quoted.c_str(), static_cast<UINT32>(quoted.size()), stash_text_format_,
+                                      D2D1::RectF(16.0f, kStashTextTop, w - 16.0f, h - kStashTextBottom),
+                                      bar_brush_);
+        }
+        // 底部复制按钮；点击后短暂显示「已复制」作为回执。
+        const float button_top = h - kStashButtonBottom - kStashButtonHeight;
+        const D2D1_ROUNDED_RECT button =
+            D2D1::RoundedRect(D2D1::RectF((w - kStashButtonWidth) * 0.5f, button_top, (w + kStashButtonWidth) * 0.5f,
+                                          button_top + kStashButtonHeight),
+                              8.0f, 8.0f);
+        render_target_->FillRoundedRectangle(button, action_bg_brush_);
+        const bool copied = GetTickCount64() < stash_copied_until_ms_;
+        const wchar_t *label = copied ? L"\u5df2\u590d\u5236" : L"\u590d\u5236";
+        render_target_->DrawTextW(label, static_cast<UINT32>(wcslen(label)), stash_button_format_,
+                                  D2D1::RectF(0.0f, button_top, w, button_top + kStashButtonHeight), bar_brush_);
+
+        const HRESULT stash_hr = render_target_->EndDraw();
+        if (stash_hr == D2DERR_RECREATE_TARGET)
+            release_render_target();
+        return;
+    }
 
     if (has_compact_status)
     {
